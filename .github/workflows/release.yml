@@ -1,0 +1,383 @@
+# Release pipeline for z3store (TEO-1342).
+#
+# This file's path is the packslip signer identity (RELEASE_WORKFLOW_PATH in
+# scripts/lib/release-manifest.ts). Do not rename or move it, and keep the
+# signing step in this file: consumers pin the repository id plus this path.
+#
+# Tag push vX.Y.Z:   verify -> build -> attest -> packslip -> publish (draft)
+# workflow_dispatch: verify -> build only. A dry run never attests, signs or
+#                    creates a Release, because signatures and attestations
+#                    from a non-tag ref are permanent public records.
+# release published: notify-tap only, once the owner publishes the draft, so
+#                    the tap never points at assets anonymous clients cannot
+#                    download yet.
+#
+# Asset names, the tag grammar and the tap repository come from the release
+# manifest at run time; nothing below restates them.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing vX.Y.Z tag to dry-run (verify and build only; no attestation, signature or Release)."
+        required: true
+        type: string
+  release:
+    types:
+      - published
+
+permissions: {}
+
+defaults:
+  run:
+    shell: nu {0}
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+
+concurrency:
+  group: release-${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release gate
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      FUZZ_BUDGET_SECONDS: "300"
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+      binary: ${{ steps.tag.outputs.binary }}
+      sbom: ${{ steps.tag.outputs.sbom }}
+      checksum_file: ${{ steps.tag.outputs.checksum_file }}
+      archive_paths: ${{ steps.tag.outputs.archive_paths }}
+      archives: ${{ steps.tag.outputs.archives }}
+      build_assets: ${{ steps.tag.outputs.build_assets }}
+      release_assets: ${{ steps.tag.outputs.release_assets }}
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install toolchains from .mise.toml
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.9.9
+          install: true
+          cache: false
+
+      - name: Resolve tag through the release manifest
+        id: tag
+        shell: nu {0}
+        run: |
+          let r = (^bun -e r#'
+          import * as m from "./scripts/lib/release-manifest.ts";
+          const t = m.parseReleaseTag(process.env.RELEASE_TAG ?? "");
+          if (t === null) {
+            console.error(`not a release tag: ${process.env.RELEASE_TAG}`);
+            process.exit(1);
+          }
+          console.log(JSON.stringify({
+            tag: t.tag,
+            version: t.version,
+            prerelease: t.prerelease !== null,
+            binary: m.BINARY_NAME,
+            sbom: m.sbomName(t.version),
+            checksum_file: m.CHECKSUM_FILE,
+            archives: m.RELEASE_TARGETS.map((x) => m.archiveName(t.version, x)),
+            build_assets: m.buildAssetNames(t.version),
+            release_assets: m.releaseAssetNames(t.version),
+          }));
+          '# | complete)
+          if $r.exit_code != 0 {
+            error make { msg: $"release manifest rejected tag: ($r.stderr)" }
+          }
+          let t = ($r.stdout | from json)
+          let lists = [archives build_assets release_assets]
+          let paths = ($t.archives | each {|f| $"dist/($f)" } | str join " ")
+          $t
+          | transpose key value
+          | each {|kv|
+              let v = if $kv.key in $lists { $kv.value | to json --raw } else { $kv.value | into string }
+              $"($kv.key)=($v)\n"
+            }
+          | append $"archive_paths=($paths)\n"
+          | str join
+          | save --append $env.GITHUB_OUTPUT
+          print $"release ($t.tag): version ($t.version), prerelease ($t.prerelease)"
+
+      - name: Install Bun dependencies
+        shell: nu {0}
+        run: ^bun ci
+
+      - name: Check tag matches the version source
+        shell: nu {0}
+        run: ^bun scripts/check-version-tag.ts $env.RELEASE_TAG
+
+      - name: Run verify-release gate
+        shell: nu {0}
+        run: ^bun scripts/verify-release.ts
+
+  build:
+    name: Build release assets
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Install toolchains from .mise.toml
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.9.9
+          install: true
+          cache: false
+
+      - name: Install Bun dependencies
+        shell: nu {0}
+        run: ^bun ci
+
+      - name: Build every release target
+        shell: nu {0}
+        run: ^bun scripts/release-build.ts --out dist
+
+      - name: Check dist matches the manifest and SHA256SUMS
+        shell: nu {0}
+        env:
+          BUILD_ASSETS: ${{ needs.verify.outputs.build_assets }}
+          ARCHIVES: ${{ needs.verify.outputs.archives }}
+          CHECKSUM_FILE: ${{ needs.verify.outputs.checksum_file }}
+        run: |
+          let expected = ($env.BUILD_ASSETS | from json | sort)
+          let actual = (ls dist | get name | path basename | sort)
+          if $actual != $expected {
+            error make { msg: $"dist mismatch: expected ($expected | to nuon), got ($actual | to nuon)" }
+          }
+          let sums = (open --raw $"dist/($env.CHECKSUM_FILE)" | lines | where $it != "" | parse "{hash}  {file}")
+          let listed = ($sums | get file)
+          if $listed != ($listed | sort) {
+            error make { msg: "checksum file is not sorted by name" }
+          }
+          let missing = ($env.ARCHIVES | from json | where $it not-in $listed)
+          let stray = ($listed | where {|f| ($f not-in $expected) or ($f == $env.CHECKSUM_FILE) })
+          if ($missing | is-not-empty) or ($stray | is-not-empty) {
+            error make { msg: $"checksum file: missing ($missing | to nuon), unexpected ($stray | to nuon)" }
+          }
+          for row in $sums {
+            let got = (open --raw $"dist/($row.file)" | hash sha256)
+            if $got != $row.hash {
+              error make { msg: $"checksum mismatch for ($row.file)" }
+            }
+          }
+          print $"dist OK: ($actual | str join ', ')"
+
+      - name: Upload build assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  attest:
+    name: Attest build provenance
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write # Sigstore certificate for the provenance signature.
+      attestations: write # Store attestations through the attestations API.
+    steps:
+      - name: Download build assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-dist
+          path: dist
+
+      # The build job proved dist holds exactly buildAssetNames(version):
+      # every archive, the checksum file and the SBOM.
+      - name: Attest archives, checksum file and SBOM
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*
+
+  packslip:
+    name: Sign packslip manifest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: [verify, attest]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read # Cannot change the Release.
+      id-token: write # Sign the manifest with this workflow's identity.
+    steps:
+      - name: Download build assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-dist
+          path: dist
+
+      # Staged archives, not `download:`: a contents: read token cannot see
+      # the draft Release, and the Release does not exist yet. The attest job
+      # already attested these files, so the packslip only links them.
+      - name: Sign the release manifest keylessly
+        id: packslip
+        uses: jdx/packslip@44e50e5f64551234b4a382d991bd7f7f7d021d06 # v1.11.3
+        with:
+          tag: ${{ needs.verify.outputs.tag }}
+          version: ${{ needs.verify.outputs.version }}
+          artifacts: ${{ needs.verify.outputs.archive_paths }}
+          bin: ${{ needs.verify.outputs.binary }}
+          resources: |
+            sbom/cyclonedx=asset:dist/${{ needs.verify.outputs.sbom }}
+          attest: link
+          upload: false
+
+      - name: Upload packslip bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: packslip-bundle
+          path: ${{ steps.packslip.outputs.bundle }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Create draft Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    needs: [verify, build, attest, packslip]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # Create the draft Release and upload its assets.
+    steps:
+      - name: Checkout the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Install Nu from .mise.toml
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.9.9
+          install: true
+          install_args: nu
+          cache: false
+
+      - name: Download build assets
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-dist
+          path: dist
+
+      - name: Download packslip bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: packslip-bundle
+          path: dist
+
+      - name: Create the draft Release with every asset
+        if: github.event_name == 'push'
+        shell: nu {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+          ASSETS: ${{ needs.verify.outputs.release_assets }}
+        run: |
+          let expected = ($env.ASSETS | from json)
+          let actual = (ls dist | get name | path basename)
+          if ($actual | sort) != ($expected | sort) {
+            error make { msg: $"release assets mismatch: expected ($expected | sort | to nuon), got ($actual | sort | to nuon)" }
+          }
+          let files = ($expected | each {|f| $"dist/($f)" })
+          let flags = if $env.PRERELEASE == "true" { [--prerelease] } else { [] }
+          (^gh release create $env.TAG ...$files
+            --repo $env.GITHUB_REPOSITORY
+            --draft
+            --verify-tag
+            --title $env.TAG
+            --generate-notes
+            ...$flags)
+          print $"draft Release ($env.TAG) created with ($files | length) assets"
+
+  notify-tap:
+    name: Notify Homebrew tap
+    if: github.event_name == 'release' && !github.event.release.prerelease && !github.event.release.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The dispatch token lives in this environment, not as a repository secret.
+    environment: homebrew-tap
+    permissions:
+      contents: read
+    env:
+      # Secrets cannot appear in `if:`; expose only whether one is set.
+      HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN != '' }}
+    steps:
+      - name: Skip without a tap dispatch token
+        if: env.HAS_TAP_TOKEN != 'true'
+        shell: nu {0}
+        run: print "HOMEBREW_TAP_DISPATCH_TOKEN not set; tap notification skipped"
+
+      - name: Checkout the tag
+        if: env.HAS_TAP_TOKEN == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Install toolchains from .mise.toml
+        if: env.HAS_TAP_TOKEN == 'true'
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.9.9
+          install: true
+          install_args: bun nu
+          cache: false
+
+      - name: Send repository_dispatch to the tap
+        if: env.HAS_TAP_TOKEN == 'true'
+        shell: nu {0}
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
+        run: |
+          let r = (^bun -e r#'
+          import { HOMEBREW_TAP_REPO, parseReleaseTag } from "./scripts/lib/release-manifest.ts";
+          const t = parseReleaseTag(process.env.RELEASE_TAG ?? "");
+          if (t === null) {
+            console.error(`not a release tag: ${process.env.RELEASE_TAG}`);
+            process.exit(1);
+          }
+          console.log(JSON.stringify({ tap: HOMEBREW_TAP_REPO, tag: t.tag, version: t.version }));
+          '# | complete)
+          if $r.exit_code != 0 {
+            error make { msg: $"release manifest rejected tag: ($r.stderr)" }
+          }
+          let t = ($r.stdout | from json)
+          (^gh api --method POST $"repos/($t.tap)/dispatches"
+            -f event_type=z3store-release-published
+            -f $"client_payload[tag]=($t.tag)"
+            -f $"client_payload[version]=($t.version)")
+          print $"dispatched z3store-release-published ($t.tag) to ($t.tap)"
