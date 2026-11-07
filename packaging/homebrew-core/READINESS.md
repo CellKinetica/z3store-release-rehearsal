@@ -50,7 +50,7 @@ links (<https://docs.brew.sh/Package-Acceptance-Policy>,
 | Compiler support (Apple Clang unless declared) | PASS | Zig toolchain is the declared build dependency (I) |
 | Installation automated, no manual steps | PASS | `zig build --prefix` installs `bin/zt`; no post-install step (M) |
 | Vendored dependencies | PASS | `build.zig.zon` declares no dependencies (I, from reading `build.zig.zon`) |
-| Versioned dependency policy | RISK | Versions.md: dependents "must not depend on the same formulae at two different versions" in their recursive tree, and versions "should not be used to 'pin' formulae to your personal requirements". `zig@0.16` is a build-only dependency with no `zig` in the tree, so the first clause holds (I). Reviewers may still ask for current `zig` (G) |
+| Versioned dependency policy | BLOCK until the 0.17 port | Versions.md: dependents "must not depend on the same formulae at two different versions" in their recursive tree, and versions "should not be used to 'pin' formulae to your personal requirements". `zig@0.16` is a build-only dependency with no `zig` in the tree, so the first clause holds (I). Core's auditor also fails new dependents of a deprecated formula (`Homebrew/formula_auditor.rb`, deprecated-dependency check), and `zig@0.16` is deprecated from 2027-10-01, so a core submission must build with current `zig` (M for the deprecation date, I for the auditor behaviour from its source) |
 | Meaningful `test do` | PASS (draft) | the draft runs `zt root` against `$Z3STORE_ROOT` and checks `--help`. A local v0.3.1 build printed the root it was given (M) |
 | `brew audit --strict --online` / `brew style` | PASS | the draft, in a scratch tap: `brew audit --strict --online` exit 0, `brew audit --new --strict --online` exit 0, `brew style --fix` no changes (M). Notability is enforced only for homebrew/core, so `--new` in a tap does not exercise it (I) |
 | Bottle block | N/A | omitted. BrewTestBot adds bottles on merge (I) |
@@ -75,9 +75,15 @@ mise x zig@0.17.1 -- zig test -fno-emit-bin -freference-trace=0 src/exec.zig    
 | Error kind (message pattern) | Count | Where |
 |---|---|---|
 | `expected type 'Build.LazyPath', found '*const [9:0]u8'` | 1 | `build.zig:11:22` (`b.addFmt` `.paths`; `build.zig:8:22` on v0.3.1) |
+| `b.args` removed (use `run_cmd.addPassthruArgs()`) | 1 | `build.zig`, surfaces only after the first error is fixed (M, measured by the first-run lane on the `main` tree in a scratch copy) |
 | `no field named` | 0 | |
 | `deprecated` | 0 | |
 | any other `error:` in `src/` (exe and lib/exec test roots) | 0 | |
+
+With both `build.zig` edits applied in a scratch copy of the `main` tree,
+`zig build test` under 0.17.1 passed 345/349; the four non-passes were two
+skips and the two Lore e2e tests that fail on that tree under 0.16.0 too (M,
+first-run lane). Nothing was committed.
 
 What this shows (I): the build runner stops at the first `build.zig`
 error, so more build-API changes may surface once that line is fixed. The
