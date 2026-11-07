@@ -1,6 +1,6 @@
 .{
     .name = .z3store,
-    .version = "0.4.0",
+    .version = "0.4.0-rc.1",
     .fingerprint = 0x6eef8a72e071f8b9,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
