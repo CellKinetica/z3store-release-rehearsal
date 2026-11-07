@@ -33,6 +33,8 @@ export const allowlist: Readonly<Record<string, string>> = {
 	"workflows/": "dated workflow records",
 	".audit/": "run audit trails quote the patterns they checked",
 	"src/tests.zig": "EugOT is arbitrary owner fixture data",
+	"docs/product/":
+		"owner-confirmed product docs (2026-10-28) name the retired pointer-mismatch failure mode they teach agents to report",
 	"scripts/check-rename-residue.ts": "defines the patterns",
 	"tests/unit/check-rename-residue.test.ts": "exercises the patterns",
 };
