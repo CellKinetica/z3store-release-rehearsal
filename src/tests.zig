@@ -2672,6 +2672,7 @@ test "adopt rejects symlinked root component before creating store path" {
 // the operator's real HOME, ghq config, or z3store root.
 
 const build_options = @import("build_options");
+const build_info = @import("build_info");
 
 /// Which captured stream a substring assertion targets.
 const Stream = enum { stdout, stderr };
@@ -3040,6 +3041,39 @@ test "e2e -h prints usage to stderr, exit 0" {
         .expect = .{ .code = 0 },
         .stream = .stderr,
         .needle = "Usage: zt",
+    });
+}
+
+// --- version (stdout, exact bytes) ---
+
+test "e2e --version and version print exactly 'zt <version>\\n' to stdout, exit 0" {
+    const gpa = testing.allocator;
+    const expected = "zt " ++ build_info.version ++ "\n";
+    const spellings = [_][]const u8{ "--version", "version" };
+    for (spellings) |spelling| {
+        var result = try spawnZtControlled(gpa, testing.io, &.{spelling}, "/tmp/z3s_e2e_version_home", "/tmp/z3s_e2e_version");
+        defer result.deinit(gpa);
+        try testing.expectEqual(@as(u8, 0), result.exit);
+        try testing.expectEqualStrings(expected, result.stdout);
+        try testing.expectEqualStrings("", result.stderr);
+    }
+}
+
+test "e2e version with an extra argument exits 2" {
+    try runE2eCase(testing.allocator, testing.io, .{
+        .argv_tail = &.{ "version", "extra" },
+        .expect = .{ .code = 2 },
+        .stream = .stderr,
+        .needle = "error: version takes no arguments: extra",
+    });
+}
+
+test "e2e --version with an extra argument exits 2" {
+    try runE2eCase(testing.allocator, testing.io, .{
+        .argv_tail = &.{ "--version", "list" },
+        .expect = .{ .code = 2 },
+        .stream = .stderr,
+        .needle = "error: --version takes no arguments: list",
     });
 }
 
