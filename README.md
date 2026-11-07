@@ -6,6 +6,17 @@ A Zig 0.16 project scaffolded from
 [`zig-qm-toolkit`](./doc/ARCHITECTURE.md), with a TS/Bun-first
 four-tier quality gate.
 
+## Install
+
+```nu
+mise use -g github:Eugene3dotdev/z3store
+mise use -g packslip:github.com/Eugene3dotdev/z3store
+brew install eugene3dotdev/tap/z3store
+```
+
+What each route verifies, checking `SHA256SUMS` by hand, version pinning and
+the PATH-shadow check: [`docs/INSTALL.md`](docs/INSTALL.md).
+
 ## Prerequisites
 
 - Zig `0.16.0` and ZLS `0.16.0` (resolved through `mise`).
