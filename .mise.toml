@@ -1,2 +1,6 @@
 [tools]
 zig = "0.16.0"
+# Release CI installs everything below through jdx/mise-action from this
+# file alone (TEO-1342). Bun runs the TypeScript gates; Nu runs workflow steps.
+bun = "1.3.14"
+nu = "0.108.0"

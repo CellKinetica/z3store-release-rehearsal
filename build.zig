@@ -3,6 +3,9 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // Release archives build with -Dstrip=true so embedded debug paths cannot
+    // make artifacts depend on the build machine's checkout location.
+    const strip = b.option(bool, "strip", "Strip debug info from zt") orelse false;
 
     const fmt = b.addFmt(.{
         .paths = &.{ "build.zig", "build.zig.zon", "src" },
@@ -23,6 +26,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = strip,
     });
 
     const exe = b.addExecutable(.{
