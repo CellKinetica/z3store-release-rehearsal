@@ -11,6 +11,11 @@ const config_mod = @import("config.zig");
 const clone_mod = @import("clone.zig");
 const list_mod = @import("list.zig");
 const lore = @import("lore.zig");
+const build_info = @import("build_info");
+
+/// `zt --version` / `zt version` output. Release tooling parses this exact
+/// shape, so keep it `zt <version>` with a single trailing newline.
+const version_text = "zt " ++ build_info.version ++ "\n";
 
 const usage_text =
     \\Usage: zt <command> [options]
@@ -47,9 +52,11 @@ const usage_text =
     \\  gh-repo [--export] [path]
     \\                    Print GH_REPO for GitHub CLI compatibility
     \\  lore <path>       Report EpicGames Lore workspace (.lore/) status
+    \\  version           Print the zt version
     \\
     \\Global options:
     \\  --help, -h        Show this help message
+    \\  --version         Print the zt version
     \\
     \\See also: docs/MIGRATION-ghq-to-gitstore.md, https://github.com/Eugene3dotdev/z3store
     \\
@@ -451,6 +458,19 @@ test "usage_text starts with 'Usage: zt'" {
     try std.testing.expect(std.mem.startsWith(u8, usage_text, "Usage: zt"));
 }
 
+test "version_text is 'zt <build.zig.zon version>' plus one newline" {
+    const v = build_info.version;
+    try std.testing.expect(v.len > 0);
+    // build.zig.zon carries the bare SemVer; the `v` prefix belongs to tags.
+    try std.testing.expect(v[0] >= '0' and v[0] <= '9');
+    try std.testing.expect(std.mem.indexOfAny(u8, v, " \t\r\n") == null);
+    try std.testing.expect(std.mem.startsWith(u8, version_text, "zt "));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, version_text, "\n"));
+    try std.testing.expect(std.mem.endsWith(u8, version_text, "\n"));
+    try std.testing.expect(std.mem.indexOf(u8, usage_text, "  --version ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, usage_text, "  version ") != null);
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const gpa = init.gpa;
@@ -466,6 +486,21 @@ pub fn main(init: std.process.Init) !u8 {
 
     if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
         try printUsage(io);
+        return 0;
+    }
+
+    if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "version")) {
+        if (args_iter.next()) |arg| {
+            var buf: [512]u8 = undefined;
+            var w = File.stderr().writerStreaming(io, &buf);
+            try w.interface.print("error: {s} takes no arguments: {s}\n", .{ command, arg });
+            try w.flush();
+            return 2;
+        }
+        var buf: [256]u8 = undefined;
+        var w = File.stdout().writerStreaming(io, &buf);
+        try w.interface.writeAll(version_text);
+        try w.flush();
         return 0;
     }
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const zon = @import("build.zig.zon");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -6,6 +7,11 @@ pub fn build(b: *std.Build) void {
     // Release archives build with -Dstrip=true so embedded debug paths cannot
     // make artifacts depend on the build machine's checkout location.
     const strip = b.option(bool, "strip", "Strip debug info from zt") orelse false;
+
+    // build.zig.zon is the only version source; `zt --version`, the release
+    // archives and check-version-tag.ts all derive from this one field.
+    const build_info = b.addOptions();
+    build_info.addOption([]const u8, "version", zon.version);
 
     const fmt = b.addFmt(.{
         .paths = &.{ "build.zig", "build.zig.zon", "src" },
@@ -28,6 +34,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .strip = strip,
     });
+    exe_mod.addOptions("build_info", build_info);
 
     const exe = b.addExecutable(.{
         .name = "zt",
@@ -59,6 +66,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const integration_tests = b.addTest(.{ .root_module = integration_mod });
+    // main.zig is also compiled into this module, so it needs the same
+    // build_info import as exe_mod.
+    integration_mod.addOptions("build_info", build_info);
 
     // The integration suite includes e2e tests that spawn the real `zt`
     // binary, so it must be built first. `dependOn(&exe.step)` guarantees the

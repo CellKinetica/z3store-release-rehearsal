@@ -271,6 +271,22 @@ async function main(): Promise<void> {
 	const startedAt = Date.now();
 	const root = repoRoot();
 
+	// Tag/version mismatch is cheap to detect, so it fails before the long tiers.
+	const releaseTag =
+		process.env.RELEASE_TAG ||
+		(process.env.GITHUB_REF_TYPE === "tag"
+			? process.env.GITHUB_REF_NAME
+			: undefined);
+	if (releaseTag) {
+		console.log(`== check-version-tag ${releaseTag} ==`);
+		const tagCheck = Bun.spawnSync(
+			[process.execPath, "scripts/check-version-tag.ts", releaseTag],
+			{ cwd: root, stdout: "inherit", stderr: "inherit", stdin: "ignore" },
+		);
+		if (tagCheck.exitCode !== 0) {
+			await finish(tagCheck.exitCode ?? 1, startedAt);
+		}
+	}
 	console.log("== verify-release -> verify-pr ==");
 	const pr = Bun.spawnSync([process.execPath, "scripts/verify-pr.ts"], {
 		cwd: root,
