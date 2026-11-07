@@ -9,6 +9,11 @@ mise use -g packslip:github.com/Eugene3dotdev/z3store
 brew install eugene3dotdev/tap/z3store
 ```
 
+The two `mise use` lines resolve `latest`, which mise holds back for the first
+24 hours after a release (see [`minimum_release_age`](#minimum_release_age));
+on release day, ask for the exact version, for example
+`mise use -g github:Eugene3dotdev/z3store@0.4.0` **[run, mock]**.
+
 Status (2026-11-07): no Release carries assets yet. Releases v0.2.0 to v0.3.0
 exist with zero assets, so all three routes fail today; the first release the
 workflow publishes is 0.4.0. See [Current state](#current-state-measured).
@@ -42,10 +47,14 @@ on 2026-11-07 with mise 2026.9.9, **[src]** mise source at tag v2026.9.9,
   `mise install` chose `z3store-0.4.0-macos-arm64.tar.gz` on this Mac and
   `mise lock --platform linux-x64,linux-arm64,macos-x64,macos-arm64` resolved
   one archive per platform **[run]**.
-- Checksum: mise looks for a global checksum file named `SHA256SUMS` among
-  others **[src]**, and verifies the download against it ("Found checksum for
-  z3store-0.4.0-macos-arm64.tar.gz from SHA256SUMS") **[run, mock]**. When the
-  GitHub API reports an asset digest, mise checks that too **[doc: github backend]**.
+- Checksum: when the GitHub API reports a per-asset `digest` (real GitHub
+  Releases do), mise verifies the download against that digest and never reads
+  `SHA256SUMS` **[run: with a digest present, a deliberately wrong `SHA256SUMS`
+  was ignored and the mock logged no request for it]**. Only when the API has no
+  digest does mise fall back to a global checksum file named `SHA256SUMS`
+  **[src; run, mock]**. The digest proves the bytes were not changed after
+  upload; it cannot tell a genuine archive from a wrong one uploaded in its
+  place. That is what the attestation and packslip checks are for.
 - GitHub artifact attestations: "mise checks GitHub artifact attestations when
   a release asset has them" **[doc]**. It queries the attestation API with the
   asset's digest **[src]**. It is on by default and runs only when the
@@ -147,15 +156,29 @@ An older `zt` earlier on `PATH` hides the one mise installed: a stale
 silently. Check:
 
 ```nu
-mise x -- which zt          # the binary mise resolves
+mise which zt               # the binary mise resolves
 which -a zt                 # every zt on PATH, in order
 zt --version
 ```
 
-The first line should be under mise's installs directory (for example
-`.../installs/github-eugene3dotdev-z3store/0.4.0/zt` **[run, mock]**), and the
-first row of `which -a zt` should be that file or mise's shim. If another `zt`
-comes first, remove it or reorder `PATH`, then re-check.
+`mise which zt` should print a path under mise's installs directory (for
+example `.../installs/github-eugene3dotdev-z3store/0.4.0/zt` **[run, mock]**),
+and the first row of `which -a zt` should be that file or mise's shim. If
+another `zt` comes first, remove it or reorder `PATH`, then re-check. Do not
+rely on `mise x -- which zt` or `mise x -- zt --version` for this: the first
+still reports the shadowing binary, and the second runs the right binary and so
+hides the shadow **[run: Homebrew 0.3.1 `zt` placed ahead of mise's shims;
+`which zt` and `mise x -- which zt` returned the Homebrew copy, `mise x -- zt
+--version` printed `zt 0.4.0`, `mise doctor` reported nothing]**.
+
+## Known issue: linux-x64 under Rosetta
+
+The linux-x64 binary runs on real x86_64 Linux hosts and containers
+**[run: ubuntu:22.04, ubuntu:24.04, alpine on an x86_64 host]**, but inside
+`linux/amd64` containers run through Rosetta on an Apple Silicon Mac it exits
+133 with `rosetta error: bss_size overflow` **[run: OrbStack, same three
+images]**. QEMU runs it. Use the linux-arm64 archive in arm64 containers on a
+Mac, or a real x86_64 host.
 
 ## Current state (measured)
 
