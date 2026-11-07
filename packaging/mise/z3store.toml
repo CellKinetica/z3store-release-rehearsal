@@ -1,0 +1,20 @@
+# DRAFT, not submitted: mise registry popularity gate (normally thousands of stars; repo has 0)
+#
+# Shape of `registry/z3store.toml` in jdx/mise, per
+# https://mise.jdx.dev/contributing/registry.html (keys alphabetized; packslip is
+# tier 1, github tier 2) and the live entry registry/hk.toml at mise v2026.9.9.
+# Asset names, the bundle name and the workflow path are not restated here as a
+# pattern: they come from scripts/lib/release-manifest.ts (archiveName,
+# PACKSLIP_BUNDLE, RELEASE_WORKFLOW_PATH). TEO-1342.
+#
+# `min_version` holds the first release the release workflow will publish
+# (owner decision: next version 0.4.0). Earlier Releases carry no assets.
+backends = [
+  { full = "packslip:github.com/Eugene3dotdev/z3store", min_version = "0.4.0", options = { workflow = "release.yml" } },
+  { full = "github:Eugene3dotdev/z3store", min_version = "0.4.0" },
+]
+bins = ["zt"]
+description = "Workspace control plane: ghq-style checkouts with detached Git/JJ databases"
+os = ["linux", "macos"]
+test = { cmd = "zt --version", expected = "zt {{version}}" }
+version_order = "semver"

@@ -1,0 +1,38 @@
+# DRAFT, not submitted: mise registry popularity gate (normally thousands of stars; repo has 0)
+# The aqua-registry has its own review; this recipe is a draft for the same
+# reason and is not proposed there either.
+#
+# Shape follows live recipes in aquaproj/aqua-registry (pkgs/jdx/mise and
+# pkgs/cli/cli registry.yaml). The asset template mirrors archiveName() in
+# scripts/lib/release-manifest.ts: PACKAGE_NAME-<version>-<mise.os>-<mise.arch>
+# with mise tokens linux/macos and x64/arm64, hence the replacements below.
+# The checksum file is CHECKSUM_FILE; the signer workflow is
+# RELEASE_WORKFLOW_PATH. Archives are flat, so `zt` sits at the archive root.
+# TEO-1342.
+# yaml-language-server: $schema=https://raw.githubusercontent.com/aquaproj/aqua/main/json-schema/registry.json
+packages:
+  - type: github_release
+    repo_owner: Eugene3dotdev
+    repo_name: z3store
+    description: "Workspace control plane: ghq-style checkouts with detached Git/JJ databases"
+    version_constraint: semver(">= 0.4.0-0")
+    asset: z3store-{{trimV .Version}}-{{.OS}}-{{.Arch}}.{{.Format}}
+    format: tar.gz
+    files:
+      - name: zt
+        src: zt
+    replacements:
+      amd64: x64
+      darwin: macos
+    supported_envs:
+      - linux
+      - darwin
+    checksum:
+      type: github_release
+      asset: SHA256SUMS
+      algorithm: sha256
+    github_artifact_attestations:
+      signer_workflow: Eugene3dotdev/z3store/.github/workflows/release.yml
+    version_overrides:
+      - version_constraint: "true"
+        no_asset: true
