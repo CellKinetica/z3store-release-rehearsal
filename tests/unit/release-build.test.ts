@@ -226,6 +226,37 @@ describe("release-build helpers", () => {
 		);
 	});
 
+	test("file(1) signature check accepts Linux wording for Mach-O", () => {
+		// Linux file(1) orders the facts differently from macOS file(1); the
+		// release job runs on ubuntu, so both spellings must pass.
+		const macX64 = targetByTriple("x86_64-macos");
+		const macArm = targetByTriple("aarch64-macos");
+		expect(
+			checkFileSignature(
+				"Mach-O 64-bit x86_64 executable, flags:<NOUNDEFS|DYLDLINK|TWOLEVEL|NO_REEXPORTED_DYLIBS|PIE|HAS_TLV_DESCRIPTORS>",
+				macX64,
+			),
+		).toBeNull();
+		expect(
+			checkFileSignature(
+				"Mach-O 64-bit arm64 executable, flags:<NOUNDEFS|DYLDLINK|TWOLEVEL|PIE>",
+				macArm,
+			),
+		).toBeNull();
+		expect(
+			checkFileSignature(
+				"Mach-O 64-bit arm64 executable, flags:<NOUNDEFS|DYLDLINK|TWOLEVEL|PIE>",
+				macX64,
+			),
+		).toMatch(/expected/);
+		expect(
+			checkFileSignature(
+				"Mach-O 64-bit dynamically linked shared library arm64",
+				macArm,
+			),
+		).toMatch(/expected/);
+	});
+
 	test("members include completions and the build fails without LICENSE", async () => {
 		const root = tmp();
 		try {

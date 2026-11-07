@@ -97,8 +97,11 @@ export function checkFileSignature(
 	fileOutput: string,
 	target: ReleaseTarget,
 ): string | null {
-	if (!fileOutput.includes(target.fileSignature)) {
-		return `expected "${target.fileSignature}", file(1) said "${fileOutput.trim()}"`;
+	const missing = target.fileSignature.filter(
+		(token) => !fileOutput.includes(token),
+	);
+	if (missing.length > 0) {
+		return `expected ${JSON.stringify(target.fileSignature)}, file(1) said "${fileOutput.trim()}"`;
 	}
 	if (target.libc === "musl" && !fileOutput.includes("statically linked")) {
 		return `musl target is not statically linked: "${fileOutput.trim()}"`;

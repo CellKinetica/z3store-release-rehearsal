@@ -42,8 +42,13 @@ export type ReleaseTarget = {
 	readonly homebrew: { readonly os: HomebrewOs; readonly arch: HomebrewArch };
 	/** `musl` targets link statically, so one binary serves glibc and musl hosts. */
 	readonly libc: "musl" | null;
-	/** Substring `file(1)` must report for the built `zt` binary. */
-	readonly fileSignature: string;
+	/**
+	 * Tokens that must all appear in `file -b` output for the built `zt`
+	 * binary. Tokens, not one phrase: macOS and Linux `file` word the same
+	 * facts in a different order ("Mach-O 64-bit executable x86_64" vs
+	 * "Mach-O 64-bit x86_64 executable, flags:<...>").
+	 */
+	readonly fileSignature: readonly string[];
 };
 
 export const RELEASE_TARGETS: readonly ReleaseTarget[] = [
@@ -53,7 +58,7 @@ export const RELEASE_TARGETS: readonly ReleaseTarget[] = [
 		mise: { os: "linux", arch: "x64" },
 		homebrew: { os: "linux", arch: "intel" },
 		libc: "musl",
-		fileSignature: "ELF 64-bit LSB executable, x86-64",
+		fileSignature: ["ELF 64-bit LSB executable", "x86-64"],
 	},
 	{
 		zigTriple: "aarch64-linux-musl",
@@ -61,7 +66,7 @@ export const RELEASE_TARGETS: readonly ReleaseTarget[] = [
 		mise: { os: "linux", arch: "arm64" },
 		homebrew: { os: "linux", arch: "arm" },
 		libc: "musl",
-		fileSignature: "ELF 64-bit LSB executable, ARM aarch64",
+		fileSignature: ["ELF 64-bit LSB executable", "ARM aarch64"],
 	},
 	{
 		zigTriple: "x86_64-macos",
@@ -69,7 +74,7 @@ export const RELEASE_TARGETS: readonly ReleaseTarget[] = [
 		mise: { os: "macos", arch: "x64" },
 		homebrew: { os: "macos", arch: "intel" },
 		libc: null,
-		fileSignature: "Mach-O 64-bit executable x86_64",
+		fileSignature: ["Mach-O 64-bit", "executable", "x86_64"],
 	},
 	{
 		zigTriple: "aarch64-macos",
@@ -77,7 +82,7 @@ export const RELEASE_TARGETS: readonly ReleaseTarget[] = [
 		mise: { os: "macos", arch: "arm64" },
 		homebrew: { os: "macos", arch: "arm" },
 		libc: null,
-		fileSignature: "Mach-O 64-bit executable arm64",
+		fileSignature: ["Mach-O 64-bit", "executable", "arm64"],
 	},
 ] as const;
 
