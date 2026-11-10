@@ -4,10 +4,12 @@
  *
  * Pre-tag gate. Runs verify-pr first, then:
  *   1. Clean non-incremental rebuild
- *   2. Reproducibility check (two clean rebuilds, hash-compare zig-out/bin)
+ *   2. Reproducibility check: every release target built twice from an
+ *      empty project cache with the release build command; the sha256 of
+ *      each binary must match across the two passes
  *   3. Deep fuzz (FUZZ_BUDGET_SECONDS, default 7200 = 2h), only when
- *      `fuzz` step exists and the platform supports it. Budget-elapsed is
- *      treated as a pass ("fuzz budget elapsed; no crashes").
+ *      `fuzz` step exists and the platform supports it. An elapsed budget
+ *      is a pass only with evidence of instrumented fuzzing; see `runFuzz`.
  *   4. SBOM via `zig run scripts/emit-sbom.zig`, falling back to `syft` if
  *      on PATH; otherwise a loud skip message pointing at the ADR.
  *   5. cosign signing — only when cosign is present AND COSIGN_ENABLED=1
@@ -20,8 +22,10 @@
  */
 import { rm } from "node:fs/promises";
 import { relative, resolve } from "node:path";
+import { BUILD_ADAPTER, RELEASE_TARGETS } from "./lib/release-manifest.ts";
 import { appendJsonl, repoRoot, spawnSync, tail } from "./lib/runtime.ts";
 import {
+	miseTrustEnv,
 	runFuzz,
 	zig,
 	zigFuzzSkipMessage,
@@ -223,10 +227,6 @@ export async function hashDir(dir: string): Promise<string> {
 	return hasher.digest("hex");
 }
 
-async function hashZigOut(root: string): Promise<string> {
-	return hashDir(resolve(root, "zig-out", "bin"));
-}
-
 // Discover signable artifacts under `bin`. Returns an empty list if the
 // directory is missing or the glob crashes; never throws. Mirrors the
 // crash-tolerance of `hashDir` so a project without a `zig-out/bin`
@@ -260,6 +260,74 @@ export function listArtifacts(bin: string): string[] {
 	return out;
 }
 
+/**
+ * Differences between two passes of release builds, each a map from zig
+ * triple to the sha256 of that target's binary. Empty when both passes built
+ * the same targets to the same bytes.
+ */
+export function reproducibilityDrift(
+	first: ReadonlyMap<string, string>,
+	second: ReadonlyMap<string, string>,
+): string[] {
+	if (first.size === 0 && second.size === 0) {
+		return ["no release target was built"];
+	}
+	const drift: string[] = [];
+	for (const triple of new Set([...first.keys(), ...second.keys()])) {
+		const a = first.get(triple) ?? "(not built)";
+		const b = second.get(triple) ?? "(not built)";
+		if (a !== b) drift.push(`${triple}: first ${a}, second ${b}`);
+	}
+	return drift;
+}
+
+/**
+ * Builds every release target from an empty project cache with the command
+ * the release uses, and returns the sha256 of each binary by zig triple.
+ * Zig's global cache is left alone, so the standard library objects it holds
+ * are reused across passes.
+ *
+ * The hash covers the raw bytes, because those are the bytes that ship. The
+ * builds install under `zig-out/reproducibility`, so `zig-out/bin` keeps the
+ * native build for the stages that follow.
+ *
+ * Throws when a target fails to build or leaves no binary: a target that
+ * was not built cannot be called reproducible.
+ */
+export async function hashReleaseBuilds(
+	root: string,
+): Promise<Map<string, string>> {
+	const out = resolve(root, "zig-out", "reproducibility");
+	await rm(resolve(root, ".zig-cache"), { recursive: true, force: true });
+	await rm(out, { recursive: true, force: true });
+
+	const hashes = new Map<string, string>();
+	for (const target of RELEASE_TARGETS) {
+		const prefix = resolve(out, target.zigTriple);
+		const build = spawnSync(
+			[...BUILD_ADAPTER.buildCommand(target), "--prefix", prefix],
+			{ cwd: root, env: miseTrustEnv() },
+		);
+		if (build.code !== 0) {
+			throw new Error(
+				`release build failed for ${target.zigTriple}:\n${tail(build.stderr || build.stdout)}`,
+			);
+		}
+		const binary = Bun.file(
+			resolve(prefix, relative("zig-out", BUILD_ADAPTER.outputPath(target))),
+		);
+		if (!(await binary.exists())) {
+			throw new Error(
+				`release build for ${target.zigTriple} left no ${binary.name}`,
+			);
+		}
+		const hasher = new Bun.CryptoHasher("sha256");
+		hasher.update(await binary.arrayBuffer());
+		hashes.set(target.zigTriple, hasher.digest("hex"));
+	}
+	return hashes;
+}
+
 async function runFuzzBounded(
 	limit: string,
 	budgetSeconds: number,
@@ -290,30 +358,30 @@ async function main(): Promise<void> {
 		console.error(tail(build1.stderr || build1.stdout));
 		await finish(build1.code ?? 1, startedAt);
 	}
-	const h1 = await hashZigOut(root);
 
-	console.log("== Reproducibility check (second clean rebuild) ==");
-	await cleanArtifacts(root);
-	const build2 = zig(["build", "--summary", "all"]);
-	process.stdout.write(build2.stdout);
-	process.stderr.write(build2.stderr);
-	if (build2.code !== 0) {
-		console.error("verify-release: second clean rebuild failed");
-		await finish(build2.code ?? 1, startedAt);
-	}
-	const h2 = await hashZigOut(root);
-
-	if (h1.length === 0 && h2.length === 0) {
-		console.log(
-			"(no zig-out/bin/* artifacts to hash — reproducibility check skipped)",
+	console.log(
+		"== Reproducibility check (release targets, two clean builds) ==",
+	);
+	const passes: Map<string, string>[] = [];
+	try {
+		passes.push(await hashReleaseBuilds(root));
+		passes.push(await hashReleaseBuilds(root));
+	} catch (err) {
+		console.error(
+			`verify-release: ${err instanceof Error ? err.message : String(err)}`,
 		);
-	} else if (h1 !== h2) {
-		console.error("verify-release: rebuild produced different artifact hash");
-		console.error(`  first:  ${h1}`);
-		console.error(`  second: ${h2}`);
 		await finish(1, startedAt);
-	} else {
-		console.log(`(reproducible: ${h1})`);
+	}
+	const [first, second] = passes;
+	const drift = reproducibilityDrift(first, second);
+	if (drift.length > 0) {
+		console.error(
+			`verify-release: the release build is not reproducible:\n  ${drift.join("\n  ")}`,
+		);
+		await finish(1, startedAt);
+	}
+	for (const [triple, hash] of first) {
+		console.log(`(reproducible: ${triple} ${hash})`);
 	}
 
 	if (hasBuildStep("fuzz")) {

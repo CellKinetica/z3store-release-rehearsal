@@ -25,6 +25,17 @@ const TARGET_VERSION = "0.16.0";
 
 type Invocation = { cmd: string[]; env: Record<string, string> };
 
+/**
+ * Environment that makes `mise` trust this repo's `.mise.toml` for one
+ * command, without changing the user's global trust.
+ */
+export function miseTrustEnv(): Record<string, string> {
+	const trusted = [process.env.MISE_TRUSTED_CONFIG_PATHS, repoRoot()]
+		.filter((s): s is string => !!s && s.length > 0)
+		.join(":");
+	return { MISE_TRUSTED_CONFIG_PATHS: trusted };
+}
+
 function zigInvocation(args: string[]): Invocation {
 	const envZig = process.env.ZIG;
 	if (envZig && envZig.length > 0) {
@@ -33,13 +44,9 @@ function zigInvocation(args: string[]): Invocation {
 	// `command` is a shell builtin and cannot be exec'd by Bun.spawnSync;
 	// use Bun.which for binary lookups (CodeRabbit finding).
 	if (Bun.which("mise") !== null) {
-		const root = repoRoot();
-		const trusted = [process.env.MISE_TRUSTED_CONFIG_PATHS, root]
-			.filter((s): s is string => !!s && s.length > 0)
-			.join(":");
 		return {
 			cmd: ["mise", "x", `zig@${TARGET_VERSION}`, "--", "zig", ...args],
-			env: { MISE_TRUSTED_CONFIG_PATHS: trusted },
+			env: miseTrustEnv(),
 		};
 	}
 	console.error(
