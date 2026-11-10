@@ -10,9 +10,11 @@ brew install eugene3dotdev/tap/z3store
 ```
 
 The two `mise use` lines resolve `latest`, which mise holds back for the first
-24 hours after a release (see [`minimum_release_age`](#minimum_release_age));
-on release day, ask for the exact version, for example
-`mise use -g github:Eugene3dotdev/z3store@0.4.0` **[run, mock]**.
+24 hours after a release (see [`minimum_release_age`](#minimum_release_age)).
+On release day the `github:` route takes an exact version, for example
+`mise use -g github:Eugene3dotdev/z3store@0.4.0` **[run, mock; run, rehearsal]**.
+The `packslip:` route refuses a release under 24 hours old even by exact
+version, unless that command lowers the age **[run, rehearsal]**.
 
 Status (2026-11-07): no Release carries assets yet. Releases v0.2.0 to v0.3.0
 exist with zero assets, so all three routes fail today; the first release the
@@ -33,7 +35,10 @@ flat: `LICENSE`, `README.md`, `zt` at the root, no top-level directory.
 
 Each claim below carries its source in brackets: **[run]** a command executed
 on 2026-11-07 with mise 2026.9.9, **[src]** mise source at tag v2026.9.9,
-**[doc]** a mise or GitHub documentation page.
+**[doc]** a mise or GitHub documentation page. **[run, rehearsal]** is a
+command executed on 2026-11-10 with mise 2026.9.9 against the `v0.4.0-rc.1`
+Release that this workflow published on the rehearsal fork
+`CellKinetica/z3store-release-rehearsal`, within five minutes of publishing.
 
 ## What each route verifies
 
@@ -143,6 +148,30 @@ pinned in `mise.lock` **[doc]**. Against the mock, whose release is dated
 `@latest --minimum-release-age 1d` resolved to 0.4.0 **[run]**. So `mise use -g github:Eugene3dotdev/z3store`
 resolves to a release only once it is a day old; ask for the exact version, or
 pass `--minimum-release-age 0s` for one command, to take a fresh one.
+
+The exact-version exemption holds for `github:` only. The `packslip:` backend
+compares the bundle's transparency-log time with the cutoff on every install
+**[src: `check_verified_age` in `src/backend/packslip.rs`]**. With the default
+age, `mise install` of the exact rc through `github:` succeeded, and through
+`packslip:` it failed after the signature had verified **[run, rehearsal]**:
+
+```text
+packslip release was recorded by the transparency log at 2026-11-10T22:39:31Z,
+after the allowed cutoff 2026-11-09T22:41:53Z; refusing to bypass minimum_release_age
+```
+
+`mise ls-remote` printed no version for either backend and warned `1 newer ...
+release hidden by minimum_release_age`. With `MISE_MINIMUM_RELEASE_AGE=0s` both
+backends listed the rc, installed it and ran `zt --version` **[run,
+rehearsal]**. To take a release in its first day through packslip, lower the
+age for that one command and leave the setting alone:
+
+```nu
+mise use -g --minimum-release-age 0s packslip:github.com/Eugene3dotdev/z3store@0.4.0
+```
+
+The flag is listed by `mise use --help` and `mise install --help`; the
+rehearsal set the environment variable, not the flag.
 
 Prereleases (`-rc.N`) are excluded from `latest` and `ls-remote` unless the tool
 option `prerelease = true` is set **[doc; run against the mock: `ls-remote`
