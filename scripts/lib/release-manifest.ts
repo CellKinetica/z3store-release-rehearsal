@@ -147,10 +147,16 @@ export type VersionSourceAdapter = {
 
 const PRERELEASE_ID = String.raw`(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)`;
 
-/** One grammar for the version source and the tag, so the two cannot disagree. */
+/**
+ * One grammar for the version source and the tag, so the two cannot disagree.
+ * It is SemVer 2.0.0 without build metadata: a `+build` suffix would put a `+`
+ * into every asset name and URL, so a release version never carries one.
+ */
 const SEMVER_SOURCE = String.raw`(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(${PRERELEASE_ID}(?:\.${PRERELEASE_ID})*))?`;
 
-/** Stable release tags only: `vX.Y.Z`, with an optional SemVer prerelease such as `-rc.1`. */
+const RELEASE_VERSION_SHAPE = "MAJOR.MINOR.PATCH[-prerelease], no +build";
+
+/** Release tags: `vX.Y.Z`, with an optional SemVer prerelease such as `-rc.1`. */
 export const RELEASE_TAG_PATTERN = new RegExp(`^v${SEMVER_SOURCE}$`);
 
 const SEMVER_PATTERN = new RegExp(`^${SEMVER_SOURCE}$`);
@@ -169,15 +175,23 @@ export function parseReleaseTag(tag: string): ReleaseTag | null {
 	return { tag, version: tag.slice(1), prerelease: m[4] ?? null };
 }
 
-/** Reads `.version` from the text of `build.zig.zon`. Throws when absent or not SemVer. */
+/**
+ * Reads `.version` from the text of `build.zig.zon`. Throws when absent or not a
+ * release version. Only the `zig fmt` layout is read: `.version = "...",` on its
+ * own line. Any other layout throws, so the check fails closed.
+ */
 export function readZonVersion(zonText: string): string {
 	const m = /^\s*\.version\s*=\s*"([^"]+)"\s*,/m.exec(zonText);
 	const version = m?.[1];
 	if (version === undefined) {
-		throw new Error("build.zig.zon: no .version field");
+		throw new Error(
+			'build.zig.zon: no `.version = "...",` line (zig fmt layout expected)',
+		);
 	}
 	if (!SEMVER_PATTERN.test(version)) {
-		throw new Error(`build.zig.zon: .version "${version}" is not SemVer`);
+		throw new Error(
+			`build.zig.zon: .version "${version}" is not a supported release version (${RELEASE_VERSION_SHAPE})`,
+		);
 	}
 	return version;
 }
@@ -191,7 +205,7 @@ export const VERSION_SOURCE: VersionSourceAdapter = {
 function assertVersion(version: string): void {
 	if (!SEMVER_PATTERN.test(version)) {
 		throw new Error(
-			`release version "${version}" is not SemVer (no leading v)`,
+			`release version "${version}" is not a supported release version (${RELEASE_VERSION_SHAPE}, no leading v)`,
 		);
 	}
 }
