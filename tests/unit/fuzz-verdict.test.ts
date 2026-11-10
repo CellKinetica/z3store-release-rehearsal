@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	failedFuzzSteps,
 	missingFuzzEvidence,
@@ -145,4 +148,90 @@ test("runFuzz keeps a non-zero exit code", async () => {
 		command: printThenExit("", 3),
 	});
 	expect(verdict).toBe(3);
+});
+
+test("runFuzz fails a run that reported a failed step before the budget elapsed", async () => {
+	const verdict = await runFuzz({
+		limit: "1",
+		timeoutMs: 1_500,
+		command: [
+			"bun",
+			"-e",
+			"process.stderr.write(process.argv[1] ?? ''); await Bun.sleep(60_000);",
+			"fuzz\n+- run test failure\n",
+		],
+	});
+	expect(verdict).toBe(1);
+});
+
+function isAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function newPidFile(): string {
+	return join(mkdtempSync(join(tmpdir(), "fuzz-verdict-")), "pid");
+}
+
+// Stands in for `zig build fuzz`: starts a long-lived process of its own,
+// records that process's pid, and outlives any test budget.
+function startsALongLivedProcess(pidFile: string): string[] {
+	return [
+		"bun",
+		"-e",
+		"const child = Bun.spawn(['sleep', '60']);" +
+			"await Bun.write(process.argv[1] ?? '', String(child.pid));" +
+			"await Bun.sleep(60_000);",
+		pidFile,
+	];
+}
+
+async function expectGone(pid: number): Promise<void> {
+	expect(pid).toBeGreaterThan(0);
+	for (let waited = 0; waited < 2_000 && isAlive(pid); waited += 50) {
+		await Bun.sleep(50);
+	}
+	expect(isAlive(pid)).toBe(false);
+}
+
+test("runFuzz stops the processes its command started when the budget elapses", async () => {
+	const pidFile = newPidFile();
+	const verdict = await runFuzz({
+		limit: "1",
+		timeoutMs: 1_500,
+		command: startsALongLivedProcess(pidFile),
+	});
+	expect(verdict).toBe("timeout");
+	await expectGone(Number(readFileSync(pidFile, "utf8")));
+});
+
+test("runFuzz stops the processes its command started when the gate is terminated", async () => {
+	const pidFile = newPidFile();
+	const gate = Bun.spawn(
+		[
+			"bun",
+			"-e",
+			"import { runFuzz } from './scripts/lib/zig.ts';" +
+				"await runFuzz({ limit: '1', timeoutMs: 60_000," +
+				" command: JSON.parse(process.argv[1] ?? '[]') });",
+			JSON.stringify(startsALongLivedProcess(pidFile)),
+		],
+		{
+			cwd: join(import.meta.dir, "../.."),
+			stdout: "ignore",
+			stderr: "ignore",
+		},
+	);
+	for (let waited = 0; waited < 5_000 && !existsSync(pidFile); waited += 50) {
+		await Bun.sleep(50);
+	}
+	const grandchild = Number(readFileSync(pidFile, "utf8"));
+	gate.kill("SIGTERM");
+	await gate.exited;
+	expect(gate.signalCode).toBe("SIGTERM");
+	await expectGone(grandchild);
 });
