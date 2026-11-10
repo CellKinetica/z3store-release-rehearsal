@@ -99,13 +99,13 @@ pub fn build(b: *std.Build) void {
     const integration_step = b.step("test-integration", "Run integration/e2e tests");
     integration_step.dependOn(&run_integration.step);
 
-    // Fuzzing in Zig 0.16 is driven by the build runner's `--fuzz` flag.
-    // This step prepares the full test graph so the runner can discover
-    // project fuzz targets and rerun the relevant test binaries in fuzz mode.
-    const fuzz_step = b.step("fuzz", "Prepare fuzz-capable test runs");
-    for ([_]*std.Build.Step.Compile{ unit_tests, lib_tests, integration_tests }) |tests| {
-        fuzz_step.dependOn(&b.addRunArtifact(addFuzzTests(b, tests)).step);
-    }
+    // Fuzzing in Zig 0.16 is driven by the build runner's `--fuzz` flag, which
+    // fuzzes every test binary under this step at once. A fuzz test compiled
+    // into two binaries makes both lock the same corpus and the loser panics,
+    // so this step runs one binary. `src/tests.zig` imports every module, so
+    // the integration binary holds every fuzz test.
+    const fuzz_step = b.step("fuzz", "Prepare the fuzz-capable test run");
+    fuzz_step.dependOn(&b.addRunArtifact(addFuzzTests(b, integration_tests)).step);
 
     const docs_install = b.addInstallDirectory(.{
         .source_dir = lib_tests.getEmittedDocs(),
