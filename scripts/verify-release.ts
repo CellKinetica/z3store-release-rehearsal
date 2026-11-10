@@ -184,6 +184,8 @@ async function main(): Promise<void> {
 		if (tagCheck.exitCode !== 0) {
 			await finish(tagCheck.exitCode ?? 1, startedAt);
 		}
+	} else {
+		console.log("== check-version-tag skipped: no RELEASE_TAG / tag ref ==");
 	}
 	console.log("== verify-release -> verify-pr ==");
 	const pr = Bun.spawnSync([process.execPath, "scripts/verify-pr.ts"], {
