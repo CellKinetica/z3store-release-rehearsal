@@ -6,14 +6,15 @@
 # backend at a mock Releases API; it skips attestations and the packslip step,
 # so it proves asset selection and SHA256SUMS only.
 
-def isolated-env [dir: string] {
-	{
+def isolated-env [dir: string, age: string] {
+	let dirs = {
 		MISE_DATA_DIR: $"($dir)/data"
 		MISE_CONFIG_DIR: $"($dir)/config"
 		MISE_CACHE_DIR: $"($dir)/cache"
 		MISE_STATE_DIR: $"($dir)/state"
 		MISE_GLOBAL_CONFIG_FILE: $"($dir)/config/config.toml"
 	}
+	if $age == "" { $dirs } else { $dirs | insert MISE_MINIMUM_RELEASE_AGE $age }
 }
 
 def step [label: string, cmd: closure] {
@@ -25,11 +26,11 @@ def step [label: string, cmd: closure] {
 }
 
 # One backend: write a project mise.toml, install, and check what `zt` resolves to.
-def try-backend [root: string, name: string, tool: string, opts: string, version: string] {
+def try-backend [root: string, name: string, tool: string, opts: string, version: string, age: string] {
 	let dir = $"($root)/($name)"
 	rm -rf $dir
 	mkdir $"($dir)/proj"
-	with-env (isolated-env $dir) {
+	with-env (isolated-env $dir $age) {
 		cd $"($dir)/proj"
 		$"[tools]\n\"($tool)\" = { version = \"($version)\", prerelease = true($opts) }\n" | save -f mise.toml
 		^mise trust mise.toml
@@ -54,12 +55,14 @@ def main [
 	--version: string = "0.4.0-rc.1"  # Release version without the leading v
 	--root: string = "/Volumes/Crucial/tmp/z3store-release/fixtures/rehearsal-mise"
 	--api-url: string = ""            # mock Releases API; github backend only
+	--minimum-release-age: string = "" # e.g. 0s for a Release under a day old; empty keeps mise's default (24h)
 ] {
+	let age = $minimum_release_age
 	let gh_opts = if $api_url == "" { "" } else { $", api_url = \"($api_url)\"" }
-	mut rows = [(try-backend $root "github" $"github:($repo)" $gh_opts $version)]
+	mut rows = [(try-backend $root "github" $"github:($repo)" $gh_opts $version $age)]
 	if $api_url == "" {
-		$rows = ($rows | append (try-backend $root "packslip" $"packslip:github.com/($repo)" ", workflow = \"release.yml\"" $version))
-		with-env (isolated-env $"($root)/packslip") { step "packslip: pins" { ^mise packslip pins } | ignore }
+		$rows = ($rows | append (try-backend $root "packslip" $"packslip:github.com/($repo)" ", workflow = \"release.yml\"" $version $age))
+		with-env (isolated-env $"($root)/packslip" $age) { step "packslip: pins" { ^mise packslip pins } | ignore }
 	}
 	print "=== which -a zt (host PATH; mise's zt must come first after activation, else TEO-980 class)"
 	print (which -a zt)
