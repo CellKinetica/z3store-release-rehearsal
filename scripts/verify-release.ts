@@ -4,10 +4,12 @@
  *
  * Pre-tag gate. Runs verify-pr first, then:
  *   1. Clean non-incremental rebuild
- *   2. Reproducibility check (two clean rebuilds, hash-compare zig-out/bin)
+ *   2. Reproducibility check: every release target built twice from an
+ *      empty project cache with the release build command; the sha256 of
+ *      each binary must match across the two passes
  *   3. Deep fuzz (FUZZ_BUDGET_SECONDS, default 7200 = 2h), only when
- *      `fuzz` step exists and the platform supports it. Budget-elapsed is
- *      treated as a pass ("fuzz budget elapsed; no crashes").
+ *      `fuzz` step exists and the platform supports it. An elapsed budget
+ *      is a pass only with evidence of instrumented fuzzing; see `runFuzz`.
  *   4. SBOM via `zig run scripts/emit-sbom.zig`, falling back to `syft` if
  *      on PATH; otherwise a loud skip message pointing at the ADR.
  *   5. cosign signing — only when cosign is present AND COSIGN_ENABLED=1
@@ -20,8 +22,10 @@
  */
 import { rm } from "node:fs/promises";
 import { relative, resolve } from "node:path";
+import { BUILD_ADAPTER, RELEASE_TARGETS } from "./lib/release-manifest.ts";
 import { appendJsonl, repoRoot, spawnSync, tail } from "./lib/runtime.ts";
 import {
+	miseTrustEnv,
 	runFuzz,
 	zig,
 	zigFuzzSkipMessage,
@@ -29,20 +33,6 @@ import {
 } from "./lib/zig.ts";
 
 const TIER = "release" as const;
-const MACHO_64_LE_MAGIC = 0xfeedfacf;
-const LC_SYMTAB = 0x2;
-const LC_UUID = 0x1b;
-const LC_CODE_SIGNATURE = 0x1d;
-const MACHO_64_HEADER_SIZE = 32;
-const LOAD_COMMAND_HEADER_SIZE = 8;
-const UUID_SIZE = 16;
-const SYMTAB_COMMAND_SIZE = 24;
-const LINKEDIT_DATA_COMMAND_SIZE = 16;
-const NLIST_64_SIZE = 16;
-const NLIST_TYPE_OFFSET = 4;
-const NLIST_VALUE_OFFSET = 8;
-const N_OSO = 0x66;
-const ZIG_CACHE_OBJECT_PREFIX = new TextEncoder().encode(".zig-cache/o/");
 
 async function finish(code: number, startedAt: number): Promise<never> {
 	const durationMs = Date.now() - startedAt;
@@ -68,169 +58,9 @@ async function cleanArtifacts(root: string): Promise<void> {
 	await rm(resolve(root, "zig-out"), { recursive: true, force: true });
 }
 
-function isHexByte(b: number): boolean {
-	return (
-		(b >= 0x30 && b <= 0x39) ||
-		(b >= 0x61 && b <= 0x66) ||
-		(b >= 0x41 && b <= 0x46)
-	);
-}
-
-function matchesAt(
-	bytes: Uint8Array,
-	offset: number,
-	needle: Uint8Array,
-): boolean {
-	if (offset + needle.byteLength > bytes.byteLength) return false;
-	for (let i = 0; i < needle.byteLength; i++) {
-		if (bytes[offset + i] !== needle[i]) return false;
-	}
-	return true;
-}
-
-function canonicalizeZigCacheObjectPaths(bytes: Uint8Array): void {
-	for (let i = 0; i < bytes.byteLength; i++) {
-		if (!matchesAt(bytes, i, ZIG_CACHE_OBJECT_PREFIX)) continue;
-		let j = i + ZIG_CACHE_OBJECT_PREFIX.byteLength;
-		const start = j;
-		while (j < bytes.byteLength && isHexByte(bytes[j])) j++;
-		if (j === start || j >= bytes.byteLength || bytes[j] !== 0x2f) continue;
-		for (let k = start; k < j; k++) bytes[k] = 0x30; // keep path length stable
-		i = j;
-	}
-}
-
-function canonicalizeMachOLoadCommands(bytes: Uint8Array): boolean {
-	if (bytes.byteLength < MACHO_64_HEADER_SIZE) return false;
-	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-	if (view.getUint32(0, true) !== MACHO_64_LE_MAGIC) return false;
-
-	const ncmds = view.getUint32(16, true);
-	const sizeofcmds = view.getUint32(20, true);
-	const commandEnd = MACHO_64_HEADER_SIZE + sizeofcmds;
-	if (commandEnd > bytes.byteLength) return false;
-	let off = MACHO_64_HEADER_SIZE;
-	for (let i = 0; i < ncmds; i++) {
-		if (off + LOAD_COMMAND_HEADER_SIZE > commandEnd) return false;
-		const cmd = view.getUint32(off, true);
-		const cmdSize = view.getUint32(off + 4, true);
-		if (cmdSize < LOAD_COMMAND_HEADER_SIZE || off + cmdSize > commandEnd) {
-			return false;
-		}
-		if (cmd === LC_UUID) {
-			if (cmdSize < LOAD_COMMAND_HEADER_SIZE + UUID_SIZE) return false;
-			bytes.fill(
-				0,
-				off + LOAD_COMMAND_HEADER_SIZE,
-				off + LOAD_COMMAND_HEADER_SIZE + UUID_SIZE,
-			);
-		} else if (cmd === LC_SYMTAB) {
-			if (cmdSize < SYMTAB_COMMAND_SIZE) return false;
-			const symOff = view.getUint32(off + 8, true);
-			const nSyms = view.getUint32(off + 12, true);
-			const symBytes = nSyms * NLIST_64_SIZE;
-			if (symOff + symBytes > bytes.byteLength) return false;
-			for (let sym = 0; sym < nSyms; sym++) {
-				const entryOff = symOff + sym * NLIST_64_SIZE;
-				if (bytes[entryOff + NLIST_TYPE_OFFSET] !== N_OSO) continue;
-				bytes.fill(
-					0,
-					entryOff + NLIST_VALUE_OFFSET,
-					entryOff + NLIST_VALUE_OFFSET + 8,
-				);
-			}
-		} else if (cmd === LC_CODE_SIGNATURE) {
-			if (cmdSize < LINKEDIT_DATA_COMMAND_SIZE) return false;
-			const dataOff = view.getUint32(off + 8, true);
-			const dataSize = view.getUint32(off + 12, true);
-			if (dataOff + dataSize > bytes.byteLength) return false;
-			bytes.fill(0, dataOff, dataOff + dataSize);
-		}
-		off += cmdSize;
-	}
-	return off === commandEnd;
-}
-
-export function canonicalizeReleaseArtifactBytes(
-	bytes: Uint8Array,
-): Uint8Array {
-	const out = new Uint8Array(bytes);
-	if (!canonicalizeMachOLoadCommands(out)) return new Uint8Array(bytes);
-	// Darwin Mach-O links legitimately vary by LC_UUID and by embedded
-	// `.zig-cache/o/<hash>/...` object paths. The corresponding N_OSO
-	// timestamp and ad-hoc code-signature blob also vary with those bytes.
-	// Keep other linker data in the framed hash so release drift outside
-	// those fields remains visible.
-	canonicalizeZigCacheObjectPaths(out);
-	return out;
-}
-
-/**
- * Hash a directory tree of release artifacts with framing that prevents
- * artifact-boundary aliasing.
- *
- * Each file contributes the following to the digest:
- *   <relative-path-utf8> \0 <byte-length-decimal-utf8> \0 <raw-bytes>
- *
- * Without this framing, hashing the concatenated bytes of `["a"=abc, "b"=def]`
- * collides with `["ab"=abcdef]` because the byte stream is identical. The
- * length-prefix framing makes the digest unambiguous: distinct artifact sets
- * always produce distinct digests.
- *
- * NOTE (Codex R7 P2 follow-up — STALE): the prior commit already added the
- * length-prefixed framing below (`path \0 size \0 bytes`). Re-asserting it
- * here so future drive-by edits do not regress to a naive `hasher.update(bytes)`
- * loop. See tests/unit/hash-zig-out.test.ts for the differential cases.
- *
- * Exported so unit tests can exercise the framing on a synthetic tmpdir
- * without spinning up a real `zig build`.
- */
-export async function hashDir(dir: string): Promise<string> {
-	const glob = new Bun.Glob("**/*");
-	const files: string[] = [];
-	try {
-		for (const f of glob.scanSync({ cwd: dir, absolute: true })) files.push(f);
-	} catch (err) {
-		// ENOENT = missing dir → degrade gracefully (caller's "no
-		// artifacts under zig-out/bin to sign" path). EACCES / IO errors
-		// must NOT be silently swallowed — they're real failures and
-		// would let a release sign over an incomplete artifact set.
-		if ((err as NodeJS.ErrnoException | undefined)?.code === "ENOENT")
-			return "";
-		throw err;
-	}
-	if (files.length === 0) return "";
-	files.sort();
-	const hasher = new Bun.CryptoHasher("sha256");
-	const NUL = new Uint8Array([0]);
-	const enc = new TextEncoder();
-	for (const f of files) {
-		const bytes = canonicalizeReleaseArtifactBytes(
-			new Uint8Array(await Bun.file(f).arrayBuffer()),
-		);
-		// path \0 size \0 bytes  → length-prefixed framing per file.
-		// Use path.relative + forward-slash normalisation so the digest is
-		// stable across platforms (manual `startsWith("${dir}/")` slicing
-		// fails on Windows where Bun.Glob may return forward slashes but
-		// `dir` from path.resolve uses backslashes).
-		const rel = relative(dir, f).replaceAll("\\", "/");
-		hasher.update(enc.encode(rel));
-		hasher.update(NUL);
-		hasher.update(enc.encode(String(bytes.byteLength)));
-		hasher.update(NUL);
-		hasher.update(bytes);
-	}
-	return hasher.digest("hex");
-}
-
-async function hashZigOut(root: string): Promise<string> {
-	return hashDir(resolve(root, "zig-out", "bin"));
-}
-
 // Discover signable artifacts under `bin`. Returns an empty list if the
-// directory is missing or the glob crashes; never throws. Mirrors the
-// crash-tolerance of `hashDir` so a project without a `zig-out/bin`
-// (e.g. cargo-style layout) skips signing cleanly instead of aborting.
+// directory is missing, so a project without a `zig-out/bin` (e.g.
+// cargo-style layout) skips signing cleanly instead of aborting.
 //
 // Glob semantics (Bun.Glob): the pattern "*" matches TOP-LEVEL entries
 // only — files (and directories, but Bun.Glob.scanSync only yields paths
@@ -258,6 +88,74 @@ export function listArtifacts(bin: string): string[] {
 		throw err;
 	}
 	return out;
+}
+
+/**
+ * Differences between two passes of release builds, each a map from zig
+ * triple to the sha256 of that target's binary. Empty when both passes built
+ * the same targets to the same bytes.
+ */
+export function reproducibilityDrift(
+	first: ReadonlyMap<string, string>,
+	second: ReadonlyMap<string, string>,
+): string[] {
+	if (first.size === 0 && second.size === 0) {
+		return ["no release target was built"];
+	}
+	const drift: string[] = [];
+	for (const triple of new Set([...first.keys(), ...second.keys()])) {
+		const a = first.get(triple) ?? "(not built)";
+		const b = second.get(triple) ?? "(not built)";
+		if (a !== b) drift.push(`${triple}: first ${a}, second ${b}`);
+	}
+	return drift;
+}
+
+/**
+ * Builds every release target from an empty project cache with the command
+ * the release uses, and returns the sha256 of each binary by zig triple.
+ * Zig's global cache is left alone, so the standard library objects it holds
+ * are reused across passes.
+ *
+ * The hash covers the raw bytes, because those are the bytes that ship. The
+ * builds install under `zig-out/reproducibility`, so `zig-out/bin` keeps the
+ * native build for the stages that follow.
+ *
+ * Throws when a target fails to build or leaves no binary: a target that
+ * was not built cannot be called reproducible.
+ */
+export async function hashReleaseBuilds(
+	root: string,
+): Promise<Map<string, string>> {
+	const out = resolve(root, "zig-out", "reproducibility");
+	await rm(resolve(root, ".zig-cache"), { recursive: true, force: true });
+	await rm(out, { recursive: true, force: true });
+
+	const hashes = new Map<string, string>();
+	for (const target of RELEASE_TARGETS) {
+		const prefix = resolve(out, target.zigTriple);
+		const build = spawnSync(
+			[...BUILD_ADAPTER.buildCommand(target), "--prefix", prefix],
+			{ cwd: root, env: miseTrustEnv() },
+		);
+		if (build.code !== 0) {
+			throw new Error(
+				`release build failed for ${target.zigTriple}:\n${tail(build.stderr || build.stdout)}`,
+			);
+		}
+		const binary = Bun.file(
+			resolve(prefix, relative("zig-out", BUILD_ADAPTER.outputPath(target))),
+		);
+		if (!(await binary.exists())) {
+			throw new Error(
+				`release build for ${target.zigTriple} left no ${binary.name}`,
+			);
+		}
+		const hasher = new Bun.CryptoHasher("sha256");
+		hasher.update(await binary.arrayBuffer());
+		hashes.set(target.zigTriple, hasher.digest("hex"));
+	}
+	return hashes;
 }
 
 async function runFuzzBounded(
@@ -306,30 +204,30 @@ async function main(): Promise<void> {
 		console.error(tail(build1.stderr || build1.stdout));
 		await finish(build1.code ?? 1, startedAt);
 	}
-	const h1 = await hashZigOut(root);
 
-	console.log("== Reproducibility check (second clean rebuild) ==");
-	await cleanArtifacts(root);
-	const build2 = zig(["build", "--summary", "all"]);
-	process.stdout.write(build2.stdout);
-	process.stderr.write(build2.stderr);
-	if (build2.code !== 0) {
-		console.error("verify-release: second clean rebuild failed");
-		await finish(build2.code ?? 1, startedAt);
-	}
-	const h2 = await hashZigOut(root);
-
-	if (h1.length === 0 && h2.length === 0) {
-		console.log(
-			"(no zig-out/bin/* artifacts to hash — reproducibility check skipped)",
+	console.log(
+		"== Reproducibility check (release targets, two clean builds) ==",
+	);
+	const passes: Map<string, string>[] = [];
+	try {
+		passes.push(await hashReleaseBuilds(root));
+		passes.push(await hashReleaseBuilds(root));
+	} catch (err) {
+		console.error(
+			`verify-release: ${err instanceof Error ? err.message : String(err)}`,
 		);
-	} else if (h1 !== h2) {
-		console.error("verify-release: rebuild produced different artifact hash");
-		console.error(`  first:  ${h1}`);
-		console.error(`  second: ${h2}`);
 		await finish(1, startedAt);
-	} else {
-		console.log(`(reproducible: ${h1})`);
+	}
+	const [first, second] = passes;
+	const drift = reproducibilityDrift(first, second);
+	if (drift.length > 0) {
+		console.error(
+			`verify-release: the release build is not reproducible:\n  ${drift.join("\n  ")}`,
+		);
+		await finish(1, startedAt);
+	}
+	for (const [triple, hash] of first) {
+		console.log(`(reproducible: ${triple} ${hash})`);
 	}
 
 	if (hasBuildStep("fuzz")) {
@@ -431,9 +329,8 @@ async function main(): Promise<void> {
 	await finish(0, startedAt);
 }
 
-// Only run as a CLI when invoked directly. Importing for unit tests
-// (e.g. tests/unit/hash-zig-out.test.ts re-using `hashDir`) must not
-// trigger a full release verify pass.
+// Only run as a CLI when invoked directly. Importing for unit tests must
+// not trigger a full release verify pass.
 if (import.meta.main) {
 	await main();
 }
