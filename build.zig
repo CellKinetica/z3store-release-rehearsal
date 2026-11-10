@@ -103,9 +103,9 @@ pub fn build(b: *std.Build) void {
     // This step prepares the full test graph so the runner can discover
     // project fuzz targets and rerun the relevant test binaries in fuzz mode.
     const fuzz_step = b.step("fuzz", "Prepare fuzz-capable test runs");
-    fuzz_step.dependOn(&run_unit.step);
-    fuzz_step.dependOn(&run_lib.step);
-    fuzz_step.dependOn(&run_integration.step);
+    for ([_]*std.Build.Step.Compile{ unit_tests, lib_tests, integration_tests }) |tests| {
+        fuzz_step.dependOn(&b.addRunArtifact(addFuzzTests(b, tests)).step);
+    }
 
     const docs_install = b.addInstallDirectory(.{
         .source_dir = lib_tests.getEmittedDocs(),
@@ -114,4 +114,32 @@ pub fn build(b: *std.Build) void {
     });
     const docs_step = b.step("docs", "Install generated API docs");
     docs_step.dependOn(&docs_install.step);
+}
+
+/// Returns a copy of `tests` with error tracing off, for the `fuzz` step only.
+///
+/// Zig 0.16.0 cannot compile a `std.testing.fuzz` target in fuzz mode while
+/// error tracing is on: `lib/compiler/test_runner.zig:566` hands the
+/// `*std.builtin.StackTrace` from `@errorReturnTrace()` to
+/// `std.debug.writeStackTrace`, which takes `*const std.debug.StackTrace`.
+/// Upstream master calls `writeErrorReturnTrace` there. `zig build test` keeps
+/// tracing. Delete this and wire the plain test runs into `fuzz` once the
+/// pinned Zig carries that fix.
+fn addFuzzTests(b: *std.Build, tests: *std.Build.Step.Compile) *std.Build.Step.Compile {
+    const source = tests.root_module;
+    const mod = b.createModule(.{
+        .root_source_file = source.root_source_file,
+        .target = source.resolved_target,
+        .optimize = source.optimize,
+        .error_tracing = false,
+    });
+    for (source.import_table.keys(), source.import_table.values()) |name, import| {
+        mod.addImport(name, import);
+    }
+    const fuzz_tests = b.addTest(.{ .root_module = mod });
+    // Explicit edges only, such as the `zt` binary the e2e tests spawn.
+    for (tests.step.dependencies.items) |dependency| {
+        fuzz_tests.step.dependOn(dependency);
+    }
+    return fuzz_tests;
 }
