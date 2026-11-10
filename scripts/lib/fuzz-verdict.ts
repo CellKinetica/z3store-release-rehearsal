@@ -40,7 +40,9 @@ export function failedFuzzSteps(output: string): string[] {
  * fuzzing report lists at least one fuzz test and every listed test gained runs.
  *
  * A report this cannot read counts as missing, so a Zig that changes the report
- * format turns the gate red instead of hollow.
+ * format turns the gate red instead of hollow. That holds per entry: a listed
+ * test whose run counter is absent or unreadable is a reason of its own, even
+ * when every other entry gained runs.
  */
 export function missingFuzzEvidence(output: string): string[] {
 	const lines = output.split("\n");
@@ -48,18 +50,26 @@ export function missingFuzzEvidence(output: string): string[] {
 	if (header === -1) return ["the build runner printed no fuzzing report"];
 
 	const reasons: string[] = [];
-	let test: string | undefined;
+	const unread = (name: string) =>
+		`fuzz test "${name}" has no readable run counter`;
+	let pending: string | undefined;
 	let entries = 0;
 	for (const line of lines.slice(header + 1)) {
-		test = REPORT_TEST.exec(line)?.[1] ?? test;
-		const runs = REPORT_RUNS.exec(line);
-		if (!runs || test === undefined) continue;
-		entries += 1;
-		if (Number(runs[2]) <= Number(runs[1])) {
-			reasons.push(`fuzz test "${test}" ran no iterations`);
+		const name = REPORT_TEST.exec(line)?.[1];
+		if (name !== undefined) {
+			if (pending !== undefined) reasons.push(unread(pending));
+			pending = name;
+			entries += 1;
+			continue;
 		}
-		test = undefined;
+		const runs = REPORT_RUNS.exec(line);
+		if (!runs || pending === undefined) continue;
+		if (Number(runs[2]) <= Number(runs[1])) {
+			reasons.push(`fuzz test "${pending}" ran no iterations`);
+		}
+		pending = undefined;
 	}
+	if (pending !== undefined) reasons.push(unread(pending));
 	if (entries === 0) reasons.push("the fuzzing report lists no fuzz test");
 	return reasons;
 }
