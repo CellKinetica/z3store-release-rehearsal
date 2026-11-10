@@ -126,7 +126,8 @@ pub fn build(b: *std.Build) void {
     docs_step.dependOn(&docs_install.step);
 }
 
-/// Returns a copy of `tests` with error tracing off, for the `fuzz` step only.
+/// Returns a copy of `tests` for the `fuzz` step only, with error tracing off
+/// and the LLVM backend forced.
 ///
 /// Zig 0.16.0 cannot compile a `std.testing.fuzz` target in fuzz mode while
 /// error tracing is on: `lib/compiler/test_runner.zig:566` hands the
@@ -146,7 +147,14 @@ fn addFuzzTests(b: *std.Build, tests: *std.Build.Step.Compile) *std.Build.Step.C
     for (source.import_table.keys(), source.import_table.values()) |name, import| {
         mod.addImport(name, import);
     }
-    const fuzz_tests = b.addTest(.{ .root_module = mod });
+    const fuzz_tests = b.addTest(.{
+        .root_module = mod,
+        // Zig 0.16.0 builds Debug x86_64 with its own backend by default,
+        // and that backend emits no coverage instrumentation. The fuzzer
+        // then runs blind and the build runner rejects its coverage file
+        // ("pcs_len was zero"). The LLVM backend instruments every target.
+        .use_llvm = true,
+    });
     // Explicit edges only, such as the `zt` binary the e2e tests spawn.
     for (tests.step.dependencies.items) |dependency| {
         fuzz_tests.step.dependOn(dependency);
