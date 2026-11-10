@@ -109,4 +109,21 @@ describe("release-manifest", () => {
 		expect(() => readZonVersion(".{ .name = .z3store }")).toThrow();
 		expect(() => readZonVersion('.{\n    .version = "dev",\n}')).toThrow();
 	});
+
+	test("the version source and the tag accept the same prerelease forms", () => {
+		const zon = (version: string) => `.{\n    .version = "${version}",\n}`;
+		for (const version of ["0.4.0", "0.4.0-rc.1", "1.0.0-alpha-1.0"]) {
+			expect(readZonVersion(zon(version))).toBe(version);
+			expect(parseReleaseTag(`v${version}`)?.version).toBe(version);
+		}
+		for (const version of [
+			"0.4.0-rc.01",
+			"0.4.0-..",
+			"0.4.0-",
+			"0.4.0-rc..1",
+		]) {
+			expect(() => readZonVersion(zon(version))).toThrow();
+			expect(parseReleaseTag(`v${version}`)).toBeNull();
+		}
+	});
 });

@@ -150,12 +150,15 @@ export type VersionSourceAdapter = {
 	readonly read: (text: string) => string;
 };
 
-/** Stable release tags only: `vX.Y.Z`, with an optional SemVer prerelease such as `-rc.1`. */
-export const RELEASE_TAG_PATTERN =
-	/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?$/;
+const PRERELEASE_ID = String.raw`(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)`;
 
-const SEMVER_PATTERN =
-	/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/;
+/** One grammar for the version source and the tag, so the two cannot disagree. */
+const SEMVER_SOURCE = String.raw`(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(${PRERELEASE_ID}(?:\.${PRERELEASE_ID})*))?`;
+
+/** Stable release tags only: `vX.Y.Z`, with an optional SemVer prerelease such as `-rc.1`. */
+export const RELEASE_TAG_PATTERN = new RegExp(`^v${SEMVER_SOURCE}$`);
+
+const SEMVER_PATTERN = new RegExp(`^${SEMVER_SOURCE}$`);
 
 export type ReleaseTag = {
 	readonly tag: string;
