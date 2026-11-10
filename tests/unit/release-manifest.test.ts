@@ -121,6 +121,8 @@ describe("release-manifest", () => {
 			"0.4.0-..",
 			"0.4.0-",
 			"0.4.0-rc..1",
+			"1.0.0+build.1",
+			"1.0.0-rc.1+b",
 		]) {
 			expect(() => readZonVersion(zon(version))).toThrow();
 			expect(parseReleaseTag(`v${version}`)).toBeNull();

@@ -115,6 +115,23 @@ test("a run that printed no report is not evidence of fuzzing", () => {
 	).toEqual(["the fuzzing report lists no fuzz test"]);
 });
 
+test("a listed fuzz test without a readable run counter is not evidence", () => {
+	const first = '"tests.test.config: fuzz resolvePrecedence is total"';
+	const second = '"url.test.url: fuzz — parse must not crash on any input"';
+	const unreadableFirst = CORPUS_CONTENDED.replace(
+		"Runs: 0 -> 0\n",
+		"Runs: 0 to 0\n",
+	);
+	expect(missingFuzzEvidence(unreadableFirst)).toEqual([
+		`fuzz test ${first} has no readable run counter`,
+	]);
+	const missingLast = CORPUS_CONTENDED.replace("Runs: 0 -> 104288\n", "");
+	expect(missingFuzzEvidence(missingLast)).toEqual([
+		`fuzz test ${first} ran no iterations`,
+		`fuzz test ${second} has no readable run counter`,
+	]);
+});
+
 function printThenExit(text: string, code: number): string[] {
 	return [
 		"bun",

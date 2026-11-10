@@ -464,9 +464,7 @@ test "version_text is 'zt <build.zig.zon version>' plus one newline" {
     // build.zig.zon carries the bare SemVer; the `v` prefix belongs to tags.
     try std.testing.expect(v[0] >= '0' and v[0] <= '9');
     try std.testing.expect(std.mem.indexOfAny(u8, v, " \t\r\n") == null);
-    try std.testing.expect(std.mem.startsWith(u8, version_text, "zt "));
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, version_text, "\n"));
-    try std.testing.expect(std.mem.endsWith(u8, version_text, "\n"));
+    try std.testing.expectEqualStrings("zt " ++ v ++ "\n", version_text);
     try std.testing.expect(std.mem.indexOf(u8, usage_text, "  --version ") != null);
     try std.testing.expect(std.mem.indexOf(u8, usage_text, "  version ") != null);
 }

@@ -55,6 +55,7 @@ jobs:
     env:
       FUZZ_BUDGET_SECONDS: "300"
     outputs:
+      commit: ${{ steps.commit.outputs.commit }}
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
       prerelease: ${{ steps.tag.outputs.prerelease }}
@@ -79,6 +80,33 @@ jobs:
           version: 2026.9.9
           install: true
           cache: false
+
+      # A tag is a mutable ref. This is the only job that resolves it; build
+      # and publish check out the commit recorded here, so a tag moved while
+      # the run is in flight cannot swap the source after the gate passed.
+      # On a tag push the commit must also be the one that started the run,
+      # because the attestation names github.sha as the source.
+      - name: Bind the run to the commit behind the tag
+        id: commit
+        shell: nu {0}
+        run: |
+          let head = (^git rev-parse --verify "HEAD^{commit}" | complete)
+          if $head.exit_code != 0 {
+            error make { msg: $"cannot resolve the checked-out commit: ($head.stderr)" }
+          }
+          let commit = ($head.stdout | str trim)
+          if $env.GITHUB_EVENT_NAME == "push" {
+            let pushed = (^git rev-parse --verify $"($env.GITHUB_SHA)^{commit}" | complete)
+            if $pushed.exit_code != 0 {
+              error make { msg: $"cannot resolve the pushed object ($env.GITHUB_SHA): ($pushed.stderr)" }
+            }
+            let pushed_commit = ($pushed.stdout | str trim)
+            if $pushed_commit != $commit {
+              error make { msg: $"tag ($env.RELEASE_TAG) moved: the push was ($pushed_commit), the tag now resolves to ($commit)" }
+            }
+          }
+          $"commit=($commit)\n" | save --append $env.GITHUB_OUTPUT
+          print $"release ($env.RELEASE_TAG) is bound to commit ($commit)"
 
       - name: Resolve tag through the release manifest
         id: tag
@@ -140,10 +168,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout the tag
+      - name: Checkout the verified commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.RELEASE_TAG }}
+          ref: ${{ needs.verify.outputs.commit }}
           persist-credentials: false
 
       - name: Install toolchains from .mise.toml
@@ -272,10 +300,10 @@ jobs:
     permissions:
       contents: write # Create the draft Release and upload its assets.
     steps:
-      - name: Checkout the tag
+      - name: Checkout the verified commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.RELEASE_TAG }}
+          ref: ${{ needs.verify.outputs.commit }}
           persist-credentials: false
 
       - name: Install Nu from .mise.toml
@@ -297,6 +325,34 @@ jobs:
         with:
           name: packslip-bundle
           path: dist
+
+      # The Release is created for the tag by name, so the tag must still name
+      # the commit that was verified, built and attested.
+      - name: Check the tag still names the verified commit
+        shell: nu {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.verify.outputs.tag }}
+          COMMIT: ${{ needs.verify.outputs.commit }}
+        run: |
+          def tag-object [path: string] {
+            let r = (^gh api $"repos/($env.GITHUB_REPOSITORY)/git/($path)" | complete)
+            if $r.exit_code != 0 {
+              error make { msg: $"cannot read ($path): ($r.stderr)" }
+            }
+            $r.stdout | from json | get object
+          }
+          mut object = (tag-object $"ref/tags/($env.TAG)")
+          # An annotated tag points at a tag object; follow it to the commit.
+          mut hops = 0
+          while $object.type == "tag" and $hops < 4 {
+            $object = (tag-object $"tags/($object.sha)")
+            $hops += 1
+          }
+          if $object.type != "commit" or $object.sha != $env.COMMIT {
+            error make { msg: $"tag ($env.TAG) moved: verified ($env.COMMIT), the tag now names ($object.type) ($object.sha)" }
+          }
+          print $"tag ($env.TAG) names the verified commit ($env.COMMIT)"
 
       - name: Create the draft Release with every asset
         if: github.event_name == 'push'
