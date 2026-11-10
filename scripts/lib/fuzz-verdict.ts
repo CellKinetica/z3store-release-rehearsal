@@ -7,6 +7,8 @@
  * took before fuzzing began. A crash the fuzzer finds, or a fuzz process that
  * dies on startup, therefore ends in exit 0.
  */
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const STEP_LINE = /^ *\+- .+$/;
 const FAILED_STATUS =
@@ -60,4 +62,82 @@ export function missingFuzzEvidence(output: string): string[] {
 	}
 	if (entries === 0) reasons.push("the fuzzing report lists no fuzz test");
 	return reasons;
+}
+
+/**
+ * The counters the fuzzer keeps at the head of a coverage file: `n_runs` and
+ * `pcs_len` of `SeenPcsHeader` in `lib/std/Build/abi.zig`.
+ */
+export type CoverageCounters = { runs: number; pcsLen: number };
+
+/** How far one coverage file's run count rose during a fuzz run. */
+export type CoverageGain = { id: string; runs: number; pcsLen: number };
+
+const COVERAGE_HEADER_BYTES = 24;
+
+/**
+ * Counters of every coverage file in `dir` (`.zig-cache/v`), keyed by
+ * coverage id. Empty when the directory does not exist.
+ *
+ * The fuzzer memory-maps each file and bumps `n_runs` on every iteration
+ * (`lib/fuzzer.zig`), so the counters are current even after the run is
+ * killed. That makes them the only fuzzing evidence a run leaves when its
+ * budget elapses, because the build runner prints its report only on a
+ * normal exit.
+ */
+export function readCoverageCounters(
+	dir: string,
+): Map<string, CoverageCounters> {
+	const counters = new Map<string, CoverageCounters>();
+	let ids: string[];
+	try {
+		ids = readdirSync(dir);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ENOENT") return counters;
+		throw err;
+	}
+	for (const id of ids.sort()) {
+		const bytes = readFileSync(join(dir, id));
+		if (bytes.byteLength < COVERAGE_HEADER_BYTES) continue;
+		const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		counters.set(id, {
+			runs: Number(view.getBigUint64(0, true)),
+			pcsLen: Number(view.getBigUint64(16, true)),
+		});
+	}
+	return counters;
+}
+
+/** Coverage files whose run count rose between two snapshots. */
+export function coverageGains(
+	before: ReadonlyMap<string, CoverageCounters>,
+	after: ReadonlyMap<string, CoverageCounters>,
+): CoverageGain[] {
+	const gains: CoverageGain[] = [];
+	for (const [id, { runs, pcsLen }] of after) {
+		const gained = runs - (before.get(id)?.runs ?? 0);
+		if (gained > 0) gains.push({ id, runs: gained, pcsLen });
+	}
+	return gains;
+}
+
+/**
+ * Reasons a run that was stopped by its budget does not prove that fuzzing
+ * happened. Empty when at least one coverage file gained runs and every file
+ * that did covers instrumented code.
+ *
+ * A fuzz binary built without coverage instrumentation still counts runs, but
+ * over zero program locations. The build runner rejects that only in its
+ * final report, which a stopped run never prints.
+ */
+export function missingCoverageEvidence(gains: CoverageGain[]): string[] {
+	if (gains.length === 0) {
+		return ["no coverage file gained runs; the fuzzer ran no iterations"];
+	}
+	return gains
+		.filter((gain) => gain.pcsLen === 0)
+		.map(
+			(gain) =>
+				`coverage ${gain.id} gained ${gain.runs} runs over 0 instrumented locations; the fuzzer ran blind`,
+		);
 }
