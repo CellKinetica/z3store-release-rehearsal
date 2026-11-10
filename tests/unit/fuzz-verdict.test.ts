@@ -1,10 +1,13 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	coverageGains,
 	failedFuzzSteps,
+	missingCoverageEvidence,
 	missingFuzzEvidence,
+	readCoverageCounters,
 } from "../../scripts/lib/fuzz-verdict.ts";
 import { runFuzz } from "../../scripts/lib/zig.ts";
 
@@ -164,6 +167,124 @@ test("runFuzz fails a run that reported a failed step before the budget elapsed"
 	expect(verdict).toBe(1);
 });
 
+// The head of a `.zig-cache/v/<coverage id>` file: `SeenPcsHeader` in
+// `lib/std/Build/abi.zig`, three native-endian usize fields.
+function coverageHeader(counters: {
+	runs: number;
+	pcsLen: number;
+}): Uint8Array {
+	const bytes = new Uint8Array(24 + 64);
+	const view = new DataView(bytes.buffer);
+	view.setBigUint64(0, BigInt(counters.runs), true);
+	view.setBigUint64(8, 1n, true);
+	view.setBigUint64(16, BigInt(counters.pcsLen), true);
+	return bytes;
+}
+
+function newCoverageDir(): string {
+	return mkdtempSync(join(tmpdir(), "fuzz-coverage-"));
+}
+
+test("readCoverageCounters reads the header the fuzzer keeps", () => {
+	const dir = newCoverageDir();
+	writeFileSync(
+		join(dir, "efb9f4a8dcdcc4b0"),
+		coverageHeader({ runs: 410_115, pcsLen: 20_371 }),
+	);
+	writeFileSync(join(dir, "truncated"), new Uint8Array(8));
+	expect(readCoverageCounters(dir)).toEqual(
+		new Map([["efb9f4a8dcdcc4b0", { runs: 410_115, pcsLen: 20_371 }]]),
+	);
+	expect(readCoverageCounters(join(dir, "absent"))).toEqual(new Map());
+});
+
+test("coverage that gained instrumented runs is evidence of fuzzing", () => {
+	const gains = coverageGains(
+		new Map([
+			["aaaa", { runs: 100, pcsLen: 20_371 }],
+			["stale", { runs: 7, pcsLen: 9 }],
+		]),
+		new Map([
+			["aaaa", { runs: 350, pcsLen: 20_371 }],
+			["stale", { runs: 7, pcsLen: 9 }],
+		]),
+	);
+	expect(gains).toEqual([{ id: "aaaa", runs: 250, pcsLen: 20_371 }]);
+	expect(missingCoverageEvidence(gains)).toEqual([]);
+});
+
+test("no coverage file gaining runs means the fuzzer never ran", () => {
+	const idle = new Map([["aaaa", { runs: 100, pcsLen: 20_371 }]]);
+	expect(missingCoverageEvidence(coverageGains(new Map(), new Map()))).toEqual([
+		"no coverage file gained runs; the fuzzer ran no iterations",
+	]);
+	expect(missingCoverageEvidence(coverageGains(idle, idle))).toHaveLength(1);
+});
+
+test("runs over zero instrumented locations mean the fuzzer ran blind", () => {
+	const gains = coverageGains(
+		new Map(),
+		new Map([["bbbb", { runs: 5_000, pcsLen: 0 }]]),
+	);
+	expect(missingCoverageEvidence(gains)).toEqual([
+		"coverage bbbb gained 5000 runs over 0 instrumented locations; the fuzzer ran blind",
+	]);
+});
+
+// Stands in for a `zig build fuzz` that outlives its budget: optionally
+// records fuzzing in a coverage file, then keeps running.
+function fuzzesPastTheBudget(coverage?: {
+	dir: string;
+	runs: number;
+	pcsLen: number;
+}): string[] {
+	return [
+		"bun",
+		"-e",
+		"const [file, hex] = process.argv.slice(1);" +
+			"if (file) await Bun.write(file, Buffer.from(hex ?? '', 'hex'));" +
+			"await Bun.sleep(60_000);",
+		...(coverage
+			? [
+					join(coverage.dir, "efb9f4a8dcdcc4b0"),
+					Buffer.from(coverageHeader(coverage)).toString("hex"),
+				]
+			: []),
+	];
+}
+
+test("runFuzz fails an elapsed budget that recorded no fuzzing", async () => {
+	const verdict = await runFuzz({
+		limit: "1",
+		timeoutMs: 1_500,
+		command: fuzzesPastTheBudget(),
+		coverageDir: newCoverageDir(),
+	});
+	expect(verdict).toBe(1);
+});
+
+test("runFuzz fails an elapsed budget spent fuzzing blind", async () => {
+	const dir = newCoverageDir();
+	const verdict = await runFuzz({
+		limit: "1",
+		timeoutMs: 1_500,
+		command: fuzzesPastTheBudget({ dir, runs: 5_000, pcsLen: 0 }),
+		coverageDir: dir,
+	});
+	expect(verdict).toBe(1);
+});
+
+test("runFuzz accepts an elapsed budget spent on instrumented fuzzing", async () => {
+	const dir = newCoverageDir();
+	const verdict = await runFuzz({
+		limit: "1",
+		timeoutMs: 1_500,
+		command: fuzzesPastTheBudget({ dir, runs: 5_000, pcsLen: 20_371 }),
+		coverageDir: dir,
+	});
+	expect(verdict).toBe("timeout");
+});
+
 function isAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
@@ -200,12 +321,12 @@ async function expectGone(pid: number): Promise<void> {
 
 test("runFuzz stops the processes its command started when the budget elapses", async () => {
 	const pidFile = newPidFile();
-	const verdict = await runFuzz({
+	await runFuzz({
 		limit: "1",
 		timeoutMs: 1_500,
 		command: startsALongLivedProcess(pidFile),
+		coverageDir: newCoverageDir(),
 	});
-	expect(verdict).toBe("timeout");
 	await expectGone(Number(readFileSync(pidFile, "utf8")));
 });
 

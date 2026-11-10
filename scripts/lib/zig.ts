@@ -11,7 +11,14 @@
  * Never trust bare PATH `zig` silently: §0.7 non-negotiable.
  */
 import { spawn } from "node:child_process";
-import { failedFuzzSteps, missingFuzzEvidence } from "./fuzz-verdict.ts";
+import { resolve } from "node:path";
+import {
+	coverageGains,
+	failedFuzzSteps,
+	missingCoverageEvidence,
+	missingFuzzEvidence,
+	readCoverageCounters,
+} from "./fuzz-verdict.ts";
 import { cpuCount, repoRoot, type SpawnResult, spawnSync } from "./runtime.ts";
 
 const TARGET_VERSION = "0.16.0";
@@ -84,12 +91,15 @@ function killGroup(pid: number | undefined): void {
  * Run `zig build fuzz` under a wall-clock budget. Returns:
  *   "pass"    — the run finished, no step failed, and the fuzzing report
  *               shows every listed fuzz test gained runs
- *   "timeout" — the budget elapsed with no failed step printed; treated as
- *               a clean pass by callers
+ *   "timeout" — the budget elapsed with no failed step printed and a
+ *               coverage file that gained instrumented runs; treated as a
+ *               clean pass by callers
  *   number    — a real fuzz failure: the non-zero exit code, or 1 when a
- *               step failed or a run that exited 0 lacks fuzzing evidence
+ *               step failed or the run lacks fuzzing evidence
  *
- * Exit 0 alone is not a pass on Zig 0.16.0; see `fuzz-verdict.ts`.
+ * Exit 0 alone is not a pass on Zig 0.16.0, and neither is an elapsed
+ * budget: a run that never started fuzzing, or fuzzed a binary without
+ * coverage instrumentation, also ends that way. See `fuzz-verdict.ts`.
  *
  * The build runs in its own process group. The fuzz processes are
  * grandchildren of this one and hold the corpus lock, so a budget that
@@ -108,7 +118,15 @@ export async function runFuzz(opts: {
 	 * canned build-runner output or outlives the budget.
 	 */
 	command?: string[];
+	/**
+	 * Test seam: the directory the fuzzer keeps its coverage files in.
+	 * Defaults to `.zig-cache/v` in the repo.
+	 */
+	coverageDir?: string;
 }): Promise<"pass" | "timeout" | number> {
+	const coverageDir =
+		opts.coverageDir ?? resolve(repoRoot(), ".zig-cache", "v");
+	const coverageBefore = readCoverageCounters(coverageDir);
 	const { cmd, env } = opts.command
 		? { cmd: opts.command, env: {} }
 		: zigInvocation([
@@ -171,11 +189,29 @@ export async function runFuzz(opts: {
 	const output = `${stdout}\n${stderr}`;
 	const failed = failedFuzzSteps(output);
 	if (timedOut) {
-		if (failed.length === 0) return "timeout";
-		console.error(
-			`runFuzz: a fuzz step failed before the budget elapsed:\n  ${failed.join("\n  ")}`,
+		if (failed.length > 0) {
+			console.error(
+				`runFuzz: a fuzz step failed before the budget elapsed:\n  ${failed.join("\n  ")}`,
+			);
+			return 1;
+		}
+		const gains = coverageGains(
+			coverageBefore,
+			readCoverageCounters(coverageDir),
 		);
-		return 1;
+		const missing = missingCoverageEvidence(gains);
+		if (missing.length > 0) {
+			console.error(
+				`runFuzz: the budget elapsed but the run is not a pass:\n  ${missing.join("\n  ")}`,
+			);
+			return 1;
+		}
+		for (const gain of gains) {
+			console.log(
+				`runFuzz: coverage ${gain.id} gained ${gain.runs} runs over ${gain.pcsLen} instrumented locations before the budget elapsed`,
+			);
+		}
+		return "timeout";
 	}
 	if (code !== 0) return code ?? 1;
 	const reasons = [...failed, ...missingFuzzEvidence(output)];
