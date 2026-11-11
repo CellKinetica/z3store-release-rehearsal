@@ -22,7 +22,11 @@
  */
 import { rm } from "node:fs/promises";
 import { relative, resolve } from "node:path";
-import { BUILD_ADAPTER, RELEASE_TARGETS } from "./lib/release-manifest.ts";
+import {
+	BUILD_ADAPTER,
+	type BuildAdapter,
+	RELEASE_TARGETS,
+} from "./lib/release-manifest.ts";
 import { appendJsonl, repoRoot, spawnSync, tail } from "./lib/runtime.ts";
 import {
 	miseTrustEnv,
@@ -53,7 +57,8 @@ function hasBuildStep(step: string): boolean {
 	return re.test(text);
 }
 
-async function cleanArtifacts(root: string): Promise<void> {
+/** Removes the project cache and the install tree, so the next build is not incremental. */
+export async function cleanArtifacts(root: string): Promise<void> {
 	await rm(resolve(root, ".zig-cache"), { recursive: true, force: true });
 	await rm(resolve(root, "zig-out"), { recursive: true, force: true });
 }
@@ -123,9 +128,12 @@ export function reproducibilityDrift(
  *
  * Throws when a target fails to build or leaves no binary: a target that
  * was not built cannot be called reproducible.
+ *
+ * `adapter` is a test seam. The gate always builds with `BUILD_ADAPTER`.
  */
 export async function hashReleaseBuilds(
 	root: string,
+	adapter: BuildAdapter = BUILD_ADAPTER,
 ): Promise<Map<string, string>> {
 	const out = resolve(root, "zig-out", "reproducibility");
 	await rm(resolve(root, ".zig-cache"), { recursive: true, force: true });
@@ -135,7 +143,7 @@ export async function hashReleaseBuilds(
 	for (const target of RELEASE_TARGETS) {
 		const prefix = resolve(out, target.zigTriple);
 		const build = spawnSync(
-			[...BUILD_ADAPTER.buildCommand(target), "--prefix", prefix],
+			[...adapter.buildCommand(target), "--prefix", prefix],
 			{ cwd: root, env: miseTrustEnv() },
 		);
 		if (build.code !== 0) {
@@ -144,7 +152,7 @@ export async function hashReleaseBuilds(
 			);
 		}
 		const binary = Bun.file(
-			resolve(prefix, relative("zig-out", BUILD_ADAPTER.outputPath(target))),
+			resolve(prefix, relative("zig-out", adapter.outputPath(target))),
 		);
 		if (!(await binary.exists())) {
 			throw new Error(
