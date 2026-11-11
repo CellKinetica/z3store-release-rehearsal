@@ -96,8 +96,8 @@ function killGroup(pid: number | undefined): void {
 
 /**
  * Run `zig build fuzz` under a wall-clock budget. Returns:
- *   "pass"    — the run finished, no step failed, and the fuzzing report
- *               shows every listed fuzz test gained runs
+ *   "pass"    — the run finished, no step failed, and every entry of the
+ *               fuzzing report (one per fuzz test binary) gained runs
  *   "timeout" — the budget elapsed with no failed step printed and a
  *               coverage file that gained instrumented runs; treated as a
  *               clean pass by callers

@@ -132,6 +132,58 @@ test("a listed fuzz test without a readable run counter is not evidence", () => 
 	]);
 });
 
+test("a fuzz test line in another shape is not evidence", () => {
+	const header =
+		'Fuzz test: "tests.test.config: fuzz resolvePrecedence is total" (efb9f4a8dcdcc4b0)';
+	const trailingSpace = CLEAN.replace(header, `${header} `);
+	expect(missingFuzzEvidence(trailingSpace)).toEqual([
+		`unreadable fuzz test line: ${JSON.stringify(`${header} `)}`,
+	]);
+	const indented = CLEAN.replace(header, `  ${header}`);
+	expect(missingFuzzEvidence(indented)).toEqual([
+		`unreadable fuzz test line: ${JSON.stringify(`  ${header}`)}`,
+	]);
+	// One entry of two is malformed; the other gained runs.
+	const second =
+		'Fuzz test: "url.test.url: fuzz — parse must not crash on any input" (e5bccf278e358234)';
+	const oneOfTwo = CORPUS_CONTENDED.replace(
+		"Runs: 0 -> 0\n",
+		"Runs: 0 -> 9\n",
+	).replace(second, second.replace("(e5", "[e5"));
+	expect(missingFuzzEvidence(oneOfTwo)).toEqual([
+		`unreadable fuzz test line: ${JSON.stringify(second.replace("(e5", "[e5"))}`,
+	]);
+});
+
+test("a report with CRLF line ends is not evidence", () => {
+	const reasons = missingFuzzEvidence(CLEAN.replaceAll("\n", "\r\n"));
+	expect(reasons).toContain("the build runner printed no fuzzing report");
+});
+
+test("a run counter that belongs to no fuzz test is not evidence", () => {
+	const twice = CLEAN.replace(
+		"Runs: 0 -> 410115\n",
+		"Runs: 0 -> 410115\nRuns: 0 -> 0\n",
+	);
+	expect(missingFuzzEvidence(twice)).toEqual([
+		'run counter without a fuzz test: "Runs: 0 -> 0"',
+	]);
+	const orphan = CLEAN.replace(
+		"Step: run test\n",
+		"Runs: 7 -> 9\nStep: run test\n",
+	);
+	expect(missingFuzzEvidence(orphan)).toEqual([
+		'run counter without a fuzz test: "Runs: 7 -> 9"',
+	]);
+	const trailingSpace = CLEAN.replace(
+		"Runs: 0 -> 410115\n",
+		"Runs: 0 -> 410115 \n",
+	);
+	expect(missingFuzzEvidence(trailingSpace)).toEqual([
+		'fuzz test "tests.test.config: fuzz resolvePrecedence is total" has no readable run counter',
+	]);
+});
+
 function printThenExit(text: string, code: number): string[] {
 	return [
 		"bun",
@@ -143,11 +195,27 @@ function printThenExit(text: string, code: number): string[] {
 	];
 }
 
+// Every `runFuzz` test passes its own empty coverage directory, so no verdict
+// depends on the `.zig-cache/v` of the checkout the tests run in.
+
 test("runFuzz fails a crashed fuzz run that exits 0", async () => {
 	const verdict = await runFuzz({
 		limit: "1",
 		timeoutMs: 30_000,
 		command: printThenExit(FUZZER_FOUND_CRASH, 0),
+		coverageDir: newCoverageDir(),
+	});
+	expect(verdict).toBe(1);
+});
+
+test("runFuzz fails a run that exits 0 without a fuzzing report", async () => {
+	const stepTreeOnly = "fuzz\n+- run test w\n";
+	expect(failedFuzzSteps(stepTreeOnly)).toEqual([]);
+	const verdict = await runFuzz({
+		limit: "1",
+		timeoutMs: 30_000,
+		command: printThenExit(stepTreeOnly, 0),
+		coverageDir: newCoverageDir(),
 	});
 	expect(verdict).toBe(1);
 });
@@ -157,6 +225,7 @@ test("runFuzz passes a clean fuzz run", async () => {
 		limit: "1",
 		timeoutMs: 30_000,
 		command: printThenExit(CLEAN, 0),
+		coverageDir: newCoverageDir(),
 	});
 	expect(verdict).toBe("pass");
 });
@@ -166,22 +235,9 @@ test("runFuzz keeps a non-zero exit code", async () => {
 		limit: "1",
 		timeoutMs: 30_000,
 		command: printThenExit("", 3),
+		coverageDir: newCoverageDir(),
 	});
 	expect(verdict).toBe(3);
-});
-
-test("runFuzz fails a run that reported a failed step before the budget elapsed", async () => {
-	const verdict = await runFuzz({
-		limit: "1",
-		timeoutMs: 1_500,
-		command: [
-			"bun",
-			"-e",
-			"process.stderr.write(process.argv[1] ?? ''); await Bun.sleep(60_000);",
-			"fuzz\n+- run test failure\n",
-		],
-	});
-	expect(verdict).toBe(1);
 });
 
 // The head of a `.zig-cache/v/<coverage id>` file: `SeenPcsHeader` in
@@ -248,19 +304,24 @@ test("runs over zero instrumented locations mean the fuzzer ran blind", () => {
 	]);
 });
 
-// Stands in for a `zig build fuzz` that outlives its budget: optionally
-// records fuzzing in a coverage file, then keeps running.
-function fuzzesPastTheBudget(coverage?: {
-	dir: string;
-	runs: number;
-	pcsLen: number;
-}): string[] {
+// Stands in for a `zig build fuzz` that outlives its budget: prints `printed`,
+// optionally records fuzzing in a coverage file, then keeps running.
+function fuzzesPastTheBudget(
+	coverage?: {
+		dir: string;
+		runs: number;
+		pcsLen: number;
+	},
+	printed = "",
+): string[] {
 	return [
 		"bun",
 		"-e",
-		"const [file, hex] = process.argv.slice(1);" +
+		"const [printed, file, hex] = process.argv.slice(1);" +
+			"process.stderr.write(printed ?? '');" +
 			"if (file) await Bun.write(file, Buffer.from(hex ?? '', 'hex'));" +
 			"await Bun.sleep(60_000);",
+		printed,
 		...(coverage
 			? [
 					join(coverage.dir, "efb9f4a8dcdcc4b0"),
@@ -300,6 +361,22 @@ test("runFuzz accepts an elapsed budget spent on instrumented fuzzing", async ()
 		coverageDir: dir,
 	});
 	expect(verdict).toBe("timeout");
+});
+
+// The coverage file alone would make this run a pass, so only the failed step
+// can turn the verdict into 1.
+test("runFuzz fails a run that reported a failed step before the budget elapsed", async () => {
+	const dir = newCoverageDir();
+	const verdict = await runFuzz({
+		limit: "1",
+		timeoutMs: 1_500,
+		command: fuzzesPastTheBudget(
+			{ dir, runs: 5_000, pcsLen: 20_371 },
+			"fuzz\n+- run test failure\n",
+		),
+		coverageDir: dir,
+	});
+	expect(verdict).toBe(1);
 });
 
 function isAlive(pid: number): boolean {
@@ -355,8 +432,10 @@ test("runFuzz stops the processes its command started when the gate is terminate
 			"-e",
 			"import { runFuzz } from './scripts/lib/zig.ts';" +
 				"await runFuzz({ limit: '1', timeoutMs: 60_000," +
-				" command: JSON.parse(process.argv[1] ?? '[]') });",
+				" command: JSON.parse(process.argv[1] ?? '[]')," +
+				" coverageDir: process.argv[2] });",
 			JSON.stringify(startsALongLivedProcess(pidFile)),
+			newCoverageDir(),
 		],
 		{
 			cwd: join(import.meta.dir, "../.."),

@@ -17,6 +17,8 @@ const RERUN_FAILED = /^error: step '.+': failed to rerun in fuzz mode: /;
 const REPORT_HEADER = "======= FUZZING REPORT =======";
 const REPORT_TEST = /^Fuzz test: "(.+)" \([0-9a-f]+\)$/;
 const REPORT_RUNS = /^Runs: (\d+) -> (\d+)$/;
+const REPORT_TEST_START = "Fuzz test:";
+const REPORT_RUNS_START = "Runs:";
 
 /**
  * Lines in which the build runner reports a step that did not succeed.
@@ -37,12 +39,18 @@ export function failedFuzzSteps(output: string): string[] {
 
 /**
  * Reasons a finished run does not prove that fuzzing happened. Empty when the
- * fuzzing report lists at least one fuzz test and every listed test gained runs.
+ * fuzzing report has at least one entry and every entry gained runs.
+ *
+ * Zig 0.16.0 prints one entry per fuzz test binary and names it after that
+ * binary's first fuzz test (`fuzz_tests.items[0]` in `waitAndPrintReport`). The
+ * evidence therefore covers each reported binary, not each fuzz test in it.
  *
  * A report this cannot read counts as missing, so a Zig that changes the report
- * format turns the gate red instead of hollow. That holds per entry: a listed
- * test whose run counter is absent or unreadable is a reason of its own, even
- * when every other entry gained runs.
+ * format turns the gate red instead of hollow. That holds per line. The report
+ * of `waitAndPrintReport` pairs each `Fuzz test:` line with one `Runs:` line.
+ * A line that starts like either and has another shape is a reason of its own,
+ * and so is a test without a counter or a counter without a test, even when
+ * every other entry gained runs.
  */
 export function missingFuzzEvidence(output: string): string[] {
 	const lines = output.split("\n");
@@ -52,24 +60,38 @@ export function missingFuzzEvidence(output: string): string[] {
 	const reasons: string[] = [];
 	const unread = (name: string) =>
 		`fuzz test "${name}" has no readable run counter`;
-	let pending: string | undefined;
+	// The entry whose `Runs:` line has not been read yet. Its name is absent
+	// when its `Fuzz test:` line was unreadable, which is already a reason.
+	let open: { name: string | undefined } | undefined;
 	let entries = 0;
 	for (const line of lines.slice(header + 1)) {
-		const name = REPORT_TEST.exec(line)?.[1];
-		if (name !== undefined) {
-			if (pending !== undefined) reasons.push(unread(pending));
-			pending = name;
+		const start = line.trimStart();
+		if (start.startsWith(REPORT_TEST_START)) {
+			if (open?.name !== undefined) reasons.push(unread(open.name));
+			const name = REPORT_TEST.exec(line)?.[1];
+			if (name === undefined) {
+				reasons.push(`unreadable fuzz test line: ${JSON.stringify(line)}`);
+			}
+			open = { name };
 			entries += 1;
 			continue;
 		}
-		const runs = REPORT_RUNS.exec(line);
-		if (!runs || pending === undefined) continue;
-		if (Number(runs[2]) <= Number(runs[1])) {
-			reasons.push(`fuzz test "${pending}" ran no iterations`);
+		if (!start.startsWith(REPORT_RUNS_START)) continue;
+		if (open === undefined) {
+			reasons.push(`run counter without a fuzz test: ${JSON.stringify(line)}`);
+			continue;
 		}
-		pending = undefined;
+		const { name } = open;
+		open = undefined;
+		if (name === undefined) continue;
+		const runs = REPORT_RUNS.exec(line);
+		if (!runs) {
+			reasons.push(unread(name));
+		} else if (Number(runs[2]) <= Number(runs[1])) {
+			reasons.push(`fuzz test "${name}" ran no iterations`);
+		}
 	}
-	if (pending !== undefined) reasons.push(unread(pending));
+	if (open?.name !== undefined) reasons.push(unread(open.name));
 	if (entries === 0) reasons.push("the fuzzing report lists no fuzz test");
 	return reasons;
 }
