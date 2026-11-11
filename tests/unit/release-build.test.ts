@@ -1,8 +1,20 @@
-import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { targetByTriple } from "../../scripts/lib/release-manifest.ts";
+import {
+	archiveName,
+	buildAssetNames,
+	RELEASE_TARGETS,
+	targetByTriple,
+} from "../../scripts/lib/release-manifest.ts";
 import {
 	gzipDeterministic,
 	sortByteWise,
@@ -13,6 +25,8 @@ import {
 	checkFileSignature,
 	collectEntries,
 	formatSha256Sums,
+	type ReleaseBuildSteps,
+	releaseBuild,
 	resolveSourceDateEpoch,
 	sha256Hex,
 } from "../../scripts/release-build.ts";
@@ -137,6 +151,53 @@ describe("tar writer", () => {
 				EPOCH,
 			),
 		).toThrow(/duplicate/);
+	});
+
+	test("an archive that fills a record still ends with two zero blocks", () => {
+		// One header and 19 data blocks are 10240 bytes, exactly one record.
+		const data = new Uint8Array(19 * 512).fill(0xff);
+		const tar = writeTar([{ name: "zt", data, mode: 0o755 }], EPOCH);
+		expect(tar.byteLength).toBe(20480);
+		expect(tar[10239]).toBe(0xff);
+		expect(tar.slice(10240).every((b) => b === 0)).toBe(true);
+	});
+
+	test("rejects modes outside the permission bits and a bad mtime", () => {
+		const data = new Uint8Array(0);
+		for (const mode of [0o10000, -1, 0.5]) {
+			expect(() => writeTar([{ name: "zt", data, mode }], EPOCH)).toThrow(
+				/bad mode/,
+			);
+		}
+		for (const mtime of [-1, 1.5, 0o100000000000]) {
+			expect(() => writeTar([], mtime)).toThrow(/mtime out of range/);
+		}
+	});
+
+	test("rejects a member larger than the ustar size field", () => {
+		// Only the length is read before the size check, so no 8 GiB buffer.
+		const data = { byteLength: 0o100000000000 } as Uint8Array;
+		expect(() => writeTar([{ name: "zt", data, mode: 0o755 }], EPOCH)).toThrow(
+			/too large/,
+		);
+	});
+
+	test("gzip pins the header fields a host could vary", () => {
+		const hostile = new Uint8Array(
+			Bun.gzipSync(enc.encode("zt"), { level: 9 }),
+		);
+		hostile.set([1, 2, 3, 4], 4);
+		hostile[9] = 19;
+		const spy = spyOn(Bun, "gzipSync").mockReturnValue(hostile);
+		try {
+			const gz = gzipDeterministic(enc.encode("zt"));
+			expect([...gz.slice(4, 8)]).toEqual([0, 0, 0, 0]);
+			expect(gz[9]).toBe(3);
+			hostile[3] = 8;
+			expect(() => gzipDeterministic(enc.encode("zt"))).toThrow(/header flags/);
+		} finally {
+			spy.mockRestore();
+		}
 	});
 
 	test("sortByteWise is byte order, not locale order", () => {
@@ -287,5 +348,108 @@ describe("release-build helpers", () => {
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("releaseBuild", () => {
+	const VERSION = "0.4.0";
+	let root = "";
+	let built: string[] = [];
+	let savedEpoch: string | undefined;
+
+	const steps: ReleaseBuildSteps = {
+		buildTarget: (r, target) => {
+			built.push(target.zigTriple);
+			const bin = join(r, `stub-${target.zigTriple}`);
+			writeFileSync(bin, `zt for ${target.zigTriple}\n`);
+			return bin;
+		},
+		emitSbom: () => enc.encode('{"bomFormat":"CycloneDX"}\n'),
+	};
+
+	beforeEach(() => {
+		root = tmp();
+		built = [];
+		writeFileSync(
+			join(root, "build.zig.zon"),
+			`.{\n    .name = .z3store,\n    .version = "${VERSION}",\n}\n`,
+		);
+		writeFileSync(join(root, "README.md"), "# z3store\n");
+		writeFileSync(join(root, "LICENSE"), "fixture licence\n");
+		savedEpoch = process.env.SOURCE_DATE_EPOCH;
+		process.env.SOURCE_DATE_EPOCH = String(EPOCH);
+	});
+
+	afterEach(() => {
+		if (savedEpoch === undefined) delete process.env.SOURCE_DATE_EPOCH;
+		else process.env.SOURCE_DATE_EPOCH = savedEpoch;
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	function leftovers(): string[] {
+		return readdirSync(root).filter((n) => n.includes(".partial-"));
+	}
+
+	test("writes exactly the build asset set into an empty output directory", async () => {
+		const out = join(root, "dist");
+		mkdirSync(out);
+		await releaseBuild(root, "dist", steps);
+		expect(built).toEqual(RELEASE_TARGETS.map((t) => t.zigTriple));
+		expect(sortByteWise(readdirSync(out))).toEqual(
+			sortByteWise(buildAssetNames(VERSION)),
+		);
+		expect(leftovers()).toEqual([]);
+		const sums = run(["shasum", "-a", "256", "-c", "SHA256SUMS"], out);
+		expect(sums.code).toBe(0);
+		expect(sums.stdout.match(/: OK$/gm)?.length).toBe(
+			RELEASE_TARGETS.length + 1,
+		);
+		for (const target of RELEASE_TARGETS) {
+			const archive = join(out, archiveName(VERSION, target));
+			const list = run(["bsdtar", "-tf", archive]);
+			expect(list.stdout.trim().split("\n")).toEqual([
+				"LICENSE",
+				"README.md",
+				"zt",
+			]);
+			const zt = run(["bsdtar", "-xOf", archive, "zt"]);
+			expect(zt.stdout).toBe(`zt for ${target.zigTriple}\n`);
+		}
+	});
+
+	test("refuses a non-empty output directory before any build", async () => {
+		const out = join(root, "dist");
+		mkdirSync(out);
+		writeFileSync(join(out, "stale.tar.gz"), "old\n");
+		await expect(releaseBuild(root, "dist", steps)).rejects.toThrow(
+			/not empty/,
+		);
+		expect(built).toEqual([]);
+		expect(readdirSync(out)).toEqual(["stale.tar.gz"]);
+		expect(leftovers()).toEqual([]);
+	});
+
+	test("fails without LICENSE before any build", async () => {
+		rmSync(join(root, "LICENSE"));
+		await expect(releaseBuild(root, "dist", steps)).rejects.toThrow(/LICENSE/);
+		expect(built).toEqual([]);
+		expect(existsSync(join(root, "dist"))).toBe(false);
+		expect(leftovers()).toEqual([]);
+	});
+
+	test("fails when the staged files differ from the asset list", async () => {
+		const out = join(root, "dist");
+		const stray: ReleaseBuildSteps = {
+			...steps,
+			emitSbom: (r, epoch) => {
+				writeFileSync(join(`${out}.partial-${process.pid}`, "stray"), "x\n");
+				return steps.emitSbom(r, epoch);
+			},
+		};
+		await expect(releaseBuild(root, "dist", stray)).rejects.toThrow(
+			/asset set mismatch/,
+		);
+		expect(existsSync(out)).toBe(false);
+		expect(leftovers()).toEqual([]);
 	});
 });

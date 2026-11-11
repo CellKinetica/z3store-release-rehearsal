@@ -17,6 +17,10 @@
  * LICENSE is a required archive member. A tree without it fails here, on
  * purpose: that is the licence gate, and there is no bypass.
  *
+ * Archive members are read from the working tree, not from the commit. The
+ * archives match a tag only when the build runs in a clean checkout of it,
+ * which is what the release workflow does.
+ *
  * Exit codes: 0 pass; 1 any failure; 2 usage error.
  */
 import { existsSync, lstatSync, readdirSync } from "node:fs";
@@ -241,9 +245,23 @@ function parseArgs(argv: string[]): { out: string } {
 	return { out };
 }
 
+/** The two steps that start other programs. Tests replace them. */
+export type ReleaseBuildSteps = {
+	/** Builds one target and returns the path of its checked binary. */
+	readonly buildTarget: (
+		root: string,
+		target: ReleaseTarget,
+		epoch: number,
+	) => string;
+	readonly emitSbom: (root: string, epoch: number) => Uint8Array;
+};
+
+const REAL_STEPS: ReleaseBuildSteps = { buildTarget, emitSbom };
+
 export async function releaseBuild(
 	root: string,
 	outArg: string,
+	steps: ReleaseBuildSteps = REAL_STEPS,
 ): Promise<void> {
 	const out = resolve(root, outArg);
 	if (existsSync(out) && readdirSync(out).length > 0) {
@@ -275,7 +293,7 @@ export async function releaseBuild(
 	try {
 		const sums: { name: string; sha256: string }[] = [];
 		for (const target of RELEASE_TARGETS) {
-			const bin = buildTarget(root, target, epoch);
+			const bin = steps.buildTarget(root, target, epoch);
 			const tgz = gzipDeterministic(
 				writeTar(await collectEntries(root, bin), epoch),
 			);
@@ -283,7 +301,7 @@ export async function releaseBuild(
 			await writeFile(join(staging, name), tgz);
 			sums.push({ name, sha256: sha256Hex(tgz) });
 		}
-		const sbom = emitSbom(root, epoch);
+		const sbom = steps.emitSbom(root, epoch);
 		await writeFile(join(staging, sbomName(version)), sbom);
 		sums.push({ name: sbomName(version), sha256: sha256Hex(sbom) });
 		await writeFile(join(staging, CHECKSUM_FILE), formatSha256Sums(sums));
