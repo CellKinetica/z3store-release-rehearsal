@@ -21,9 +21,10 @@
 #   the Release is created, and notify-tap compares the tag with the
 #   provenance of the published assets. None of that stops a tag from moving;
 #   it only stops this pipeline from following the move.
-# - Protection rules on the homebrew-tap environment. A release event runs
+# - Required reviewers on the homebrew-tap environment. A release event runs
 #   this file as it is at the tagged commit, so a commit that reaches a
-#   published v* tag also brings its own notify-tap job.
+#   published v* tag also brings its own notify-tap job. A deployment rule
+#   that admits v* tags admits that commit too.
 
 name: release
 
@@ -430,7 +431,9 @@ jobs:
           install_args: bun nu
           cache: false
 
-      # The only step that runs repository code. It holds no token.
+      # The step that imports repository code. No token is in its environment.
+      # It shares the runner with the dispatch step, so this guards against an
+      # accident, not against a hostile commit; see the top of this file.
       - name: Resolve the tap through the release manifest
         id: release
         if: env.HAS_TAP_TOKEN == 'true'
@@ -461,9 +464,12 @@ jobs:
           | str join
           | save --append $env.GITHUB_OUTPUT
 
-      # The tap builds from the source archive of the tag. Notify it only when
-      # the tag still names the commit the published assets were built and
-      # attested from; a tag moved after the draft was created stops here.
+      # The tap builds from the source archive of the tag. github.sha is the
+      # commit the tag named when the Release was published, so the tag is read
+      # again here. Notify the tap only when the tag names that commit at this
+      # moment and the published assets were built and attested from it. A tag
+      # moved after this step goes unseen here; the dispatch carries the commit
+      # so the tap can compare.
       - name: Check the Release was built from the released commit
         if: env.HAS_TAP_TOKEN == 'true'
         shell: nu {0}
@@ -473,6 +479,15 @@ jobs:
           CHECKSUM_FILE: ${{ steps.release.outputs.checksum_file }}
           WORKFLOW: ${{ steps.release.outputs.workflow }}
         run: |
+          # This endpoint follows an annotated tag to its commit.
+          let named = (^gh api $"repos/($env.GITHUB_REPOSITORY)/commits/refs/tags/($env.TAG)" --jq .sha | complete)
+          if $named.exit_code != 0 {
+            error make { msg: $"cannot read tag ($env.TAG): ($named.stderr)" }
+          }
+          let commit = ($named.stdout | str trim)
+          if $commit != $env.GITHUB_SHA {
+            error make { msg: $"tag ($env.TAG) moved: it names ($commit), the Release was published at ($env.GITHUB_SHA)" }
+          }
           let dir = (mktemp --directory --tmpdir-path $env.RUNNER_TEMP "release-checksums.XXXXXX")
           let got = (^gh release download $env.TAG --repo $env.GITHUB_REPOSITORY --pattern $env.CHECKSUM_FILE --dir $dir | complete)
           if $got.exit_code != 0 {
@@ -484,7 +499,7 @@ jobs:
             --source-ref $"refs/tags/($env.TAG)"
             --source-digest $env.GITHUB_SHA | complete)
           if $proof.exit_code != 0 {
-            error make { msg: $"Release ($env.TAG) was not built from ($env.GITHUB_SHA), the commit the tag names now: ($proof.stderr)" }
+            error make { msg: $"Release ($env.TAG) was not built from ($env.GITHUB_SHA), the commit the tag names: ($proof.stderr)" }
           }
           print $"Release ($env.TAG) was built from the released commit ($env.GITHUB_SHA)"
 
@@ -500,5 +515,6 @@ jobs:
           (^gh api --method POST $"repos/($env.TAP)/dispatches"
             -f event_type=z3store-release-published
             -f $"client_payload[tag]=($env.TAG)"
-            -f $"client_payload[version]=($env.VERSION)")
+            -f $"client_payload[version]=($env.VERSION)"
+            -f $"client_payload[commit]=($env.GITHUB_SHA)")
           print $"dispatched z3store-release-published ($env.TAG) to ($env.TAP)"
