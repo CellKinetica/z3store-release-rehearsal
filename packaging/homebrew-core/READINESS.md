@@ -2,7 +2,10 @@
 
 Status: **not eligible yet. Do not submit.** This is a gap list for a future
 `Homebrew/homebrew-core` pull request (TEO-1342). The draft formula is
-[`z3store.rb`](z3store.rb). The Homebrew route is the tap,
+`drafts/homebrew-core/Formula/z3store.rb` in the tap repository
+`Eugene3dotdev/homebrew-tap`, added by that repository's pull request 9. It
+is not kept here because this repository excludes Ruby, and Homebrew does
+not load a formula from that path. The Homebrew route is the tap,
 `brew install eugene3dotdev/tap/z3store`. On 2026-11-11 the tap formula
 builds v0.3.1 from source, depends on Homebrew's current `zig` (0.17.1) and
 aborts unless it finds Zig 0.16, so a fresh install fails until the tap
