@@ -14,6 +14,16 @@
 #
 # Asset names, the tag grammar and the tap repository come from the release
 # manifest at run time; nothing below restates them.
+#
+# Repository settings this file relies on and cannot set:
+# - A tag ruleset that blocks update and deletion of v* tags. A tag is a
+#   mutable ref. The jobs below pin the commit once and re-read the tag before
+#   the Release is created, and notify-tap compares the tag with the
+#   provenance of the published assets. None of that stops a tag from moving;
+#   it only stops this pipeline from following the move.
+# - Protection rules on the homebrew-tap environment. A release event runs
+#   this file as it is at the tagged commit, so a commit that reaches a
+#   published v* tag also brings its own notify-tap job.
 
 name: release
 
@@ -327,7 +337,10 @@ jobs:
           path: dist
 
       # The Release is created for the tag by name, so the tag must still name
-      # the commit that was verified, built and attested.
+      # the commit that was verified, built and attested. This narrows the
+      # window and does not close it: `--verify-tag` below checks only that
+      # the tag exists, so a tag moved between this read and the create call
+      # goes unseen here. See "Repository settings" at the top of this file.
       - name: Check the tag still names the verified commit
         shell: nu {0}
         env:
@@ -388,6 +401,7 @@ jobs:
     environment: homebrew-tap
     permissions:
       contents: read
+      attestations: read # Read the provenance of the published checksum file.
     env:
       # Secrets cannot appear in `if:`; expose only whether one is set.
       HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN != '' }}
@@ -397,11 +411,14 @@ jobs:
         shell: nu {0}
         run: print "HOMEBREW_TAP_DISPATCH_TOKEN not set; tap notification skipped"
 
-      - name: Checkout the tag
+      # A release event runs this file as it is at github.sha, the commit the
+      # tag named when the Release was published. Check out that commit, not
+      # the tag, so the code this job runs cannot differ from this file.
+      - name: Checkout the released commit
         if: env.HAS_TAP_TOKEN == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.RELEASE_TAG }}
+          ref: ${{ github.sha }}
           persist-credentials: false
 
       - name: Install toolchains from .mise.toml
@@ -413,27 +430,75 @@ jobs:
           install_args: bun nu
           cache: false
 
+      # The only step that runs repository code. It holds no token.
+      - name: Resolve the tap through the release manifest
+        id: release
+        if: env.HAS_TAP_TOKEN == 'true'
+        shell: nu {0}
+        run: |
+          let r = (^bun -e r#'
+          import * as m from "./scripts/lib/release-manifest.ts";
+          const t = m.parseReleaseTag(process.env.RELEASE_TAG ?? "");
+          if (t === null) {
+            console.error(`not a release tag: ${process.env.RELEASE_TAG}`);
+            process.exit(1);
+          }
+          console.log(JSON.stringify({
+            tap: m.HOMEBREW_TAP_REPO,
+            tag: t.tag,
+            version: t.version,
+            checksum_file: m.CHECKSUM_FILE,
+            workflow: m.RELEASE_WORKFLOW_PATH,
+          }));
+          '# | complete)
+          if $r.exit_code != 0 {
+            error make { msg: $"release manifest rejected tag: ($r.stderr)" }
+          }
+          $r.stdout
+          | from json
+          | transpose key value
+          | each {|kv| $"($kv.key)=($kv.value)\n" }
+          | str join
+          | save --append $env.GITHUB_OUTPUT
+
+      # The tap builds from the source archive of the tag. Notify it only when
+      # the tag still names the commit the published assets were built and
+      # attested from; a tag moved after the draft was created stops here.
+      - name: Check the Release was built from the released commit
+        if: env.HAS_TAP_TOKEN == 'true'
+        shell: nu {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          CHECKSUM_FILE: ${{ steps.release.outputs.checksum_file }}
+          WORKFLOW: ${{ steps.release.outputs.workflow }}
+        run: |
+          let dir = (mktemp --directory --tmpdir-path $env.RUNNER_TEMP "release-checksums.XXXXXX")
+          let got = (^gh release download $env.TAG --repo $env.GITHUB_REPOSITORY --pattern $env.CHECKSUM_FILE --dir $dir | complete)
+          if $got.exit_code != 0 {
+            error make { msg: $"cannot download ($env.CHECKSUM_FILE) of Release ($env.TAG): ($got.stderr)" }
+          }
+          let proof = (^gh attestation verify ($dir | path join $env.CHECKSUM_FILE)
+            --repo $env.GITHUB_REPOSITORY
+            --signer-workflow $"($env.GITHUB_REPOSITORY)/($env.WORKFLOW)"
+            --source-ref $"refs/tags/($env.TAG)"
+            --source-digest $env.GITHUB_SHA | complete)
+          if $proof.exit_code != 0 {
+            error make { msg: $"Release ($env.TAG) was not built from ($env.GITHUB_SHA), the commit the tag names now: ($proof.stderr)" }
+          }
+          print $"Release ($env.TAG) was built from the released commit ($env.GITHUB_SHA)"
+
       - name: Send repository_dispatch to the tap
         if: env.HAS_TAP_TOKEN == 'true'
         shell: nu {0}
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_DISPATCH_TOKEN }}
+          TAP: ${{ steps.release.outputs.tap }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
         run: |
-          let r = (^bun -e r#'
-          import { HOMEBREW_TAP_REPO, parseReleaseTag } from "./scripts/lib/release-manifest.ts";
-          const t = parseReleaseTag(process.env.RELEASE_TAG ?? "");
-          if (t === null) {
-            console.error(`not a release tag: ${process.env.RELEASE_TAG}`);
-            process.exit(1);
-          }
-          console.log(JSON.stringify({ tap: HOMEBREW_TAP_REPO, tag: t.tag, version: t.version }));
-          '# | complete)
-          if $r.exit_code != 0 {
-            error make { msg: $"release manifest rejected tag: ($r.stderr)" }
-          }
-          let t = ($r.stdout | from json)
-          (^gh api --method POST $"repos/($t.tap)/dispatches"
+          (^gh api --method POST $"repos/($env.TAP)/dispatches"
             -f event_type=z3store-release-published
-            -f $"client_payload[tag]=($t.tag)"
-            -f $"client_payload[version]=($t.version)")
-          print $"dispatched z3store-release-published ($t.tag) to ($t.tap)"
+            -f $"client_payload[tag]=($env.TAG)"
+            -f $"client_payload[version]=($env.VERSION)")
+          print $"dispatched z3store-release-published ($env.TAG) to ($env.TAP)"
