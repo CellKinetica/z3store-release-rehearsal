@@ -39,7 +39,11 @@ export function failedFuzzSteps(output: string): string[] {
 
 /**
  * Reasons a finished run does not prove that fuzzing happened. Empty when the
- * fuzzing report lists at least one fuzz test and every listed test gained runs.
+ * fuzzing report has at least one entry and every entry gained runs.
+ *
+ * Zig 0.16.0 prints one entry per fuzz test binary and names it after that
+ * binary's first fuzz test (`fuzz_tests.items[0]` in `waitAndPrintReport`). The
+ * evidence therefore covers each reported binary, not each fuzz test in it.
  *
  * A report this cannot read counts as missing, so a Zig that changes the report
  * format turns the gate red instead of hollow. That holds per line. The report
