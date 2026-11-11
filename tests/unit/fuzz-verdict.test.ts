@@ -132,6 +132,58 @@ test("a listed fuzz test without a readable run counter is not evidence", () => 
 	]);
 });
 
+test("a fuzz test line in another shape is not evidence", () => {
+	const header =
+		'Fuzz test: "tests.test.config: fuzz resolvePrecedence is total" (efb9f4a8dcdcc4b0)';
+	const trailingSpace = CLEAN.replace(header, `${header} `);
+	expect(missingFuzzEvidence(trailingSpace)).toEqual([
+		`unreadable fuzz test line: ${JSON.stringify(`${header} `)}`,
+	]);
+	const indented = CLEAN.replace(header, `  ${header}`);
+	expect(missingFuzzEvidence(indented)).toEqual([
+		`unreadable fuzz test line: ${JSON.stringify(`  ${header}`)}`,
+	]);
+	// One entry of two is malformed; the other gained runs.
+	const second =
+		'Fuzz test: "url.test.url: fuzz — parse must not crash on any input" (e5bccf278e358234)';
+	const oneOfTwo = CORPUS_CONTENDED.replace(
+		"Runs: 0 -> 0\n",
+		"Runs: 0 -> 9\n",
+	).replace(second, second.replace("(e5", "[e5"));
+	expect(missingFuzzEvidence(oneOfTwo)).toEqual([
+		`unreadable fuzz test line: ${JSON.stringify(second.replace("(e5", "[e5"))}`,
+	]);
+});
+
+test("a report with CRLF line ends is not evidence", () => {
+	const reasons = missingFuzzEvidence(CLEAN.replaceAll("\n", "\r\n"));
+	expect(reasons).toContain("the build runner printed no fuzzing report");
+});
+
+test("a run counter that belongs to no fuzz test is not evidence", () => {
+	const twice = CLEAN.replace(
+		"Runs: 0 -> 410115\n",
+		"Runs: 0 -> 410115\nRuns: 0 -> 0\n",
+	);
+	expect(missingFuzzEvidence(twice)).toEqual([
+		'run counter without a fuzz test: "Runs: 0 -> 0"',
+	]);
+	const orphan = CLEAN.replace(
+		"Step: run test\n",
+		"Runs: 7 -> 9\nStep: run test\n",
+	);
+	expect(missingFuzzEvidence(orphan)).toEqual([
+		'run counter without a fuzz test: "Runs: 7 -> 9"',
+	]);
+	const trailingSpace = CLEAN.replace(
+		"Runs: 0 -> 410115\n",
+		"Runs: 0 -> 410115 \n",
+	);
+	expect(missingFuzzEvidence(trailingSpace)).toEqual([
+		'fuzz test "tests.test.config: fuzz resolvePrecedence is total" has no readable run counter',
+	]);
+});
+
 function printThenExit(text: string, code: number): string[] {
 	return [
 		"bun",
