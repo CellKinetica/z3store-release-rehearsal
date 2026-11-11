@@ -6,3 +6,6 @@ bun = "1.3.14"
 nu = "0.108.0"
 # The e2e tests in src/tests.zig spawn jj; hosted runners do not ship it.
 jj = "0.47.1"
+# The publish and notify-tap jobs read tags, create the Release and verify
+# attestations through gh. The copy on the hosted runner image is not pinned.
+gh = "2.103.3"

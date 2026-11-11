@@ -317,13 +317,25 @@ jobs:
           ref: ${{ needs.verify.outputs.commit }}
           persist-credentials: false
 
-      - name: Install Nu from .mise.toml
+      - name: Install Nu and gh from .mise.toml
         uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
         with:
           version: 2026.9.9
           install: true
-          install_args: nu
+          install_args: nu gh
           cache: false
+
+      # The runner image ships its own gh. Installing the pin does not prove
+      # the pin is the copy on PATH, so compare before gh does any work.
+      - name: Check gh is the copy pinned in .mise.toml
+        shell: nu {0}
+        run: |
+          let pinned = (open .mise.toml | get tools.gh)
+          let running = (^gh --version | lines | first | split row " " | get 2)
+          if $running != $pinned {
+            error make { msg: $"gh on PATH is ($running), .mise.toml pins ($pinned)" }
+          }
+          print $"gh ($running) from (which gh | get path.0)"
 
       - name: Download build assets
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -384,6 +396,17 @@ jobs:
           }
           let files = ($expected | each {|f| $"dist/($f)" })
           let flags = if $env.PRERELEASE == "true" { [--prerelease] } else { [] }
+          # Drafts are not unique per tag, so a re-run would add a second draft
+          # beside the first. Create only when gh reports that no Release,
+          # draft or published, exists for the tag. Any other answer stops the
+          # job. Runs for one tag are serialized by the concurrency group.
+          let existing = (^gh release view $env.TAG --repo $env.GITHUB_REPOSITORY --json url,isDraft | complete)
+          if $existing.exit_code == 0 {
+            error make { msg: $"a Release for ($env.TAG) already exists: ($existing.stdout | str trim). This job never replaces one. Delete it first if this run should publish." }
+          }
+          if not ($existing.stderr | str contains "release not found") {
+            error make { msg: $"cannot tell whether a Release for ($env.TAG) exists: ($existing.stderr | str trim)" }
+          }
           (^gh release create $env.TAG ...$files
             --repo $env.GITHUB_REPOSITORY
             --draft
@@ -428,7 +451,7 @@ jobs:
         with:
           version: 2026.9.9
           install: true
-          install_args: bun nu
+          install_args: bun nu gh
           cache: false
 
       # The step that imports repository code. No token is in its environment.
