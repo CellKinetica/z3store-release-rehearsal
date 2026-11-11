@@ -2,8 +2,12 @@
 
 Status: **not eligible yet. Do not submit.** This is a gap list for a future
 `Homebrew/homebrew-core` pull request (TEO-1342). The draft formula is
-[`z3store.rb`](z3store.rb). The supported install path today is the tap,
-`brew install eugene3dotdev/tap/z3store`.
+[`z3store.rb`](z3store.rb). The Homebrew route is the tap,
+`brew install eugene3dotdev/tap/z3store`. On 2026-11-11 the tap formula
+builds v0.3.1 from source, depends on Homebrew's current `zig` (0.17.1) and
+aborts unless it finds Zig 0.16, so a fresh install fails until the tap
+depends on `zig@0.16` (M for the formula text and the `zig` version, I for
+the failure, because `brew install` is blocked for agents).
 
 Measured on 2026-11-07 on himalayas (macOS 27.0.1, arm64), Homebrew
 7.0.12-126-g86f1f0c, and in the `homebrew/brew` container (Homebrew 7.0.12,
@@ -57,16 +61,15 @@ links (<https://docs.brew.sh/Package-Acceptance-Policy>,
 
 ## Zig 0.17 measurement (no port)
 
-This is a measurement only. Nothing was changed. The copy is a throwaway
-clone of `release-dist/L5-homebrew-core` at acff652 under
-`/Volumes/Crucial/tmp/z3store-release/fixtures/L5/zig017-copy`, plus an
-extract of tag v0.3.1 under `fixtures/L5/v031-copy`.
+This is a measurement only. Nothing was changed. The copies were a throwaway
+clone of this repository at acff652 and an extract of the v0.3.1 source
+archive, both outside the repository. The commands ran in each copy.
 
 ```
 mise install zig@0.17.1
 mise x zig@0.17.1 -- zig version
 # 0.17.1
-mise x zig@0.17.1 -- zig build 2>&1 | tee ../zig017-build.log            # exit 1
+mise x zig@0.17.1 -- zig build                                           # exit 1
 mise x zig@0.17.1 -- zig build-exe -fno-emit-bin -freference-trace=0 src/main.zig   # exit 0
 mise x zig@0.17.1 -- zig test -fno-emit-bin -freference-trace=0 src/lib.zig         # exit 0
 mise x zig@0.17.1 -- zig test -fno-emit-bin -freference-trace=0 src/exec.zig        # exit 0
@@ -95,12 +98,22 @@ small (G).
 
 ## Draft notes
 
-- The draft differs from the tap formula in four ways: it has no
-  `conflicts_with "gitstore"` (gitstore is tap-only), a different `desc`,
-  a stronger `test do`, and a licence placeholder comment.
+- The draft differs from the tap formula of 2026-11-11 in seven ways (M,
+  side-by-side read):
+  - `homepage`, `url` and `head` use the owner `Eugene3dotdev`, where the
+    tap still has the former owner `EugOT`;
+  - `depends_on "zig@0.16"`, where the tap has `"zig"`;
+  - `install` uses `std_zig_args(release_mode: :safe)`, where the tap runs
+    `zig build -Doptimize=ReleaseSafe` behind a Zig 0.16 version guard and
+    then `bin.install`;
+  - no `conflicts_with "gitstore"` (gitstore is tap-only);
+  - a different `desc`;
+  - a stronger `test do`;
+  - a licence placeholder comment.
 - `std_zig_args` exists in Homebrew 7.0.12:
   `brew ruby -e 'puts Formula.method_defined?(:std_zig_args)'` printed
   `true`. On this host it expands to `--prefix <p> --release=safe
   -Doptimize=ReleaseSafe --summary all -Dcpu=apple_m1 -fno-rosetta` (M).
-- At 0.4.0, switch the test to `zt --version`, which prints `zt <version>`
-  (the L1 interface).
+- At 0.4.0, add a `zt --version` assertion to the test and keep the `zt root`
+  check. `zt --version` prints `zt <version>` (the L1 interface). A version
+  check alone is a weak formula test.
