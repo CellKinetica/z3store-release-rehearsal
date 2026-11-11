@@ -16,9 +16,13 @@ On release day the `github:` route takes an exact version, for example
 The `packslip:` route refuses a release under 24 hours old even by exact
 version, unless that command lowers the age **[run, rehearsal]**.
 
-Status (2026-11-07): no Release carries assets yet. Releases v0.2.0 to v0.3.0
-exist with zero assets, so all three routes fail today; the first release the
-workflow publishes is 0.4.0. See [Current state](#current-state-measured).
+Status (2026-11-11): no Release carries assets yet. Releases v0.2.0 to v0.3.0
+exist with zero assets, so both mise routes fail today **[run]**; the first
+release the workflow publishes is 0.4.0. See
+[Current state](#current-state-measured). The Homebrew route does not use the
+release archives yet: the tap formula builds v0.3.1 from source, and a fresh
+install is expected to fail for a different reason (see
+[Homebrew tap](#homebrew-tap)).
 
 Every file name on this page comes from
 [`scripts/lib/release-manifest.ts`](../scripts/lib/release-manifest.ts), the
@@ -39,6 +43,8 @@ on 2026-11-07 with mise 2026.9.9, **[src]** mise source at tag v2026.9.9,
 command executed on 2026-11-10 with mise 2026.9.9 against the `v0.4.0-rc.1`
 Release that this workflow published on the rehearsal fork
 `CellKinetica/z3store-release-rehearsal`, within five minutes of publishing.
+**[read]** is a file read on the date given, and **[inferred]** is a
+conclusion from measured facts that no command confirmed.
 
 ## What each route verifies
 
@@ -105,10 +111,22 @@ Release that this workflow published on the rehearsal fork
 
 ### Homebrew tap
 
-`brew install eugene3dotdev/tap/z3store` installs from the tap formula, which
-pins each archive by sha256. The formula lives in the tap repository, not
-here. (This page did not run `brew install`; it is a blocked command on the
-authoring host.)
+`brew install eugene3dotdev/tap/z3store` installs from the tap formula. The
+formula lives in the tap repository, not here. On 2026-11-11 it does not
+install a release archive **[read: `Formula/z3store.rb` through the GitHub
+contents API]**:
+
+- It downloads the v0.3.1 source tarball, checks that tarball against a sha256
+  in the formula, and builds `zt` with `zig build -Doptimize=ReleaseSafe`. The
+  sha256 covers the source tarball only. Neither the attestation nor the
+  packslip check above applies to this route.
+- It depends on Homebrew's `zig` and stops unless that is Zig 0.16. Homebrew's
+  `zig` is 0.17.1 **[run, 2026-11-11: `brew info --json=v2 zig`]**, so a fresh install
+  fails until the tap depends on `zig@0.16` **[inferred: `brew install` is a
+  blocked command on the authoring host, so this page did not run it]**.
+
+A formula that installs the release archives and pins each one by sha256 is
+future work in the tap.
 
 ## Verify `SHA256SUMS` by hand
 
@@ -135,7 +153,11 @@ mise use -g packslip:github.com/Eugene3dotdev/z3store@0.4.0
 Commit `mise.lock` (`mise lock`, then `mise install --locked`) to pin the
 archive URL and checksum per platform **[doc; `mise lock` output run against
 the mock]**. Tags are `vX.Y.Z`; mise reports the version without the `v`
-**[run: `mise ls-remote` printed `0.4.0` for tag `v0.4.0`]**.
+**[run: `mise ls-remote` printed `0.4.0` for tag `v0.4.0`]**. For the
+`packslip:` route, `mise lock` applies the release age too, so locking a
+release in its first day needs `mise lock --minimum-release-age 0s` **[src:
+`packslip.rs`, the lock path calls `check_verified_age`; flag from `mise lock
+--help`; not run]**.
 
 ## `minimum_release_age`
 
@@ -151,7 +173,10 @@ pass `--minimum-release-age 0s` for one command, to take a fresh one.
 
 The exact-version exemption holds for `github:` only. The `packslip:` backend
 compares the bundle's transparency-log time with the cutoff on every install
-**[src: `check_verified_age` in `src/backend/packslip.rs`]**. With the default
+that `mise.lock` did not resolve, and on every `mise lock`. An install
+resolved from a committed `mise.lock` skips the cutoff **[src:
+`check_verified_age` and `resolved_from_lockfile` in
+`src/backend/packslip.rs`; the lockfile case was not run]**. With the default
 age, `mise install` of the exact rc through `github:` succeeded, and through
 `packslip:` it failed after the signature had verified **[run, rehearsal]**:
 
@@ -179,10 +204,14 @@ listed `0.4.0`, with `prerelease=true` it listed `0.4.0-rc.1` and `0.4.0`]**.
 
 ## PATH shadow (TEO-980 class)
 
-An older `zt` earlier on `PATH` hides the one mise installed: a stale
-`~/.local/bin/zt`, or a Homebrew `zt` ahead of mise's shims. The agent rule in
-[`docs/product/AX.md`](product/AX.md) is to stop and report, not to pick one
-silently. Check:
+Use one install route per host. Which `zt` must come first on `PATH` follows
+from the route. [`docs/product/DX.md`](product/DX.md) and
+[`docs/product/AX.md`](product/AX.md) describe the current host baseline, a
+Homebrew install, and there Homebrew's `zt` must win. The rest of this section
+is for a host that installs through mise: there an older `zt` earlier on
+`PATH` hides the one mise installed, whether a stale `~/.local/bin/zt` or a
+Homebrew `zt` ahead of mise's shims. In both cases the agent rule in AX.md is
+to stop and report, not to pick one silently. Check:
 
 ```nu
 mise which zt               # the binary mise resolves
