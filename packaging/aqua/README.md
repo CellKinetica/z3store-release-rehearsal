@@ -1,9 +1,11 @@
 # packaging/aqua
 
 `registry.yaml` is a DRAFT aqua recipe (`type: github_release`). It is not
-submitted to aquaproj/aqua-registry, and the mise registry entry that would
-point at it is not submitted either: the mise registry bar is "normally
-thousands of GitHub stars" and the repository has 0.
+submitted to aquaproj/aqua-registry. Nothing in this repository points at it:
+the mise registry draft in [`packaging/mise/z3store.toml`](../mise/z3store.toml)
+lists the `packslip:` and `github:` backends only, and it is not submitted
+either, because the mise registry bar is "normally thousands of GitHub stars"
+and the repository has 0.
 
 The asset template mirrors `archiveName()` in `scripts/lib/release-manifest.ts`
 (aqua's `darwin`/`amd64` are replaced by the manifest's `macos`/`x64`), the
@@ -37,8 +39,7 @@ The recipe names the canonical repository, so test a copy that names the fork.
 In a login Nu session (`nu -l`), from the repo root:
 
 ```nu
-let d = "/Volumes/Crucial/tmp/z3store-release/fixtures/rehearsal-aqua"
-rm -rf $d
+let d = (mktemp -d)   # a new, empty scratch directory; nothing is deleted
 mkdir $"($d)/proj"
 open --raw packaging/aqua/registry.yaml
 | str replace --all "repo_owner: Eugene3dotdev" "repo_owner: CellKinetica"
